@@ -261,7 +261,7 @@ construction (voir `tests/`), mais deux points restent à ta charge :
 | Symptôme | Cause probable | Solution |
 |---|---|---|
 | `ModuleNotFoundError: No module named 'scipy'` | dépendance manquante | `pip install scipy --break-system-packages` |
-| `_ARRAY_API not found` / erreur numpy au moment d'écrire le raster | conflit numpy 2.x / bindings GDAL | `pip install "numpy<2" --break-system-packages --force-reinstall` |
+| `_ARRAY_API not found` / erreur numpy au moment d'écrire le raster | conflit numpy 2.x / bindings GDAL (peut survenir après une simple installation de `requirements.txt`, qui ne plafonne pas la version de numpy) | `pip install "numpy<2" --break-system-packages --force-reinstall` |
 | `OSError: [Errno 122] Disk quota exceeded` ou processus tué (OOM) | `/tmp` trop petit, ou lecture d'une tuile entière en mémoire | rediriger `TMPDIR` vers un disque avec de la place ; lire par fenêtre plutôt que la tuile entière (voir §2.5) |
 | Le cercle produit semble décalé par rapport au relief attendu | mauvais point de centre, ou confusion NW/SW dans le nommage des tuiles | revérifier la conversion de coordonnées (§2.3) et le sens du nommage des tuiles de la source utilisée |
 | `RuntimeError: <fichier>: No such file or directory` | étape de fusion/téléchargement oubliée avant de lancer le script | vérifier `ls` avant de relancer |
