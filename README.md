@@ -65,6 +65,10 @@ sur Debian/Ubuntu, `gdal` sur Arch) — si `pip install gdal` échoue,
 installe GDAL via le gestionnaire de paquets de ton système plutôt que
 pip seul.
 
+Un tutoriel complet, pas à pas — de la prise en main rapide sans
+téléchargement jusqu'au traitement d'un vrai relief — est disponible
+dans [TUTORIAL.md](TUTORIAL.md).
+
 ## Usage
 
 ```bash
@@ -75,8 +79,21 @@ python circle_dem_to_stl.py \
     --diameter-mm 250 --vexag 1.0
 ```
 
-Sans `--diameter-mm` ni `--base-mm`, le script les demande de façon
-interactive au lancement.
+Ou directement en coordonnées géographiques (WGS84), que la source soit
+déjà projetée ou non — si elle est en CRS géographique, une zone UTM
+est déterminée et appliquée automatiquement, sans reprojection manuelle
+préalable :
+
+```bash
+python circle_dem_to_stl.py \
+    --input copernicus_glo30.tif \
+    --output relief_disc.stl \
+    --lat 35.3606 --lon 138.7274 --radius 9300 \
+    --diameter-mm 250 --vexag 1.0
+```
+
+Sans `--diameter-mm`, `--base-mm` ni `--vexag`, le script les demande de
+façon interactive au lancement.
 
 ### Mode île (relief entouré d'eau sans donnée fiable)
 
@@ -93,36 +110,44 @@ python circle_dem_to_stl.py \
 
 | Option | Description | Défaut |
 |---|---|---|
-| `--input` | GeoTIFF ou VRT source, CRS projeté en mètres | requis |
+| `--input` | GeoTIFF ou VRT source, CRS géographique ou projeté | requis |
 | `--output` | Fichier STL de sortie | requis |
-| `--cx`, `--cy` | Centre du cercle (unités du CRS source) | requis |
+| `--cx`, `--cy` | Centre du cercle, dans le CRS du fichier source | voir `--lat`/`--lon` |
+| `--lat`, `--lon` | Centre du cercle en WGS84 — alternative à `--cx`/`--cy` | voir `--cx`/`--cy` |
 | `--radius` | Rayon du cercle, en mètres | requis |
 | `--diameter-mm` | Diamètre final imprimé, en mm | demandé si omis (250) |
 | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
-| `--vexag` | Exagération verticale | 1.0 |
+| `--vexag` | Exagération verticale | demandée si omise (1.0) |
 | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
 
-## `island_dem_to_stl.py`
+Fournis soit `--cx`/`--cy`, soit `--lat`/`--lon` — pas les deux.
 
-Variante conservée pour le cas où l'on veut suivre le **contour réel du
-littoral** (silhouette exacte, pas un disque) plutôt qu'un cercle avec
-mer plate autour — moins utilisée en pratique au fil du projet
-(le rendu en dents de scie du littoral brut s'est révélé moins
-satisfaisant visuellement que le disque avec mer plate), mais gardée
-disponible.
+## Architecture
+
+```
+circle_dem_to_stl.py   # argparse, prompts interactifs, orchestration
+raster.py              # GDAL : ouverture, détection/reprojection CRS, ré-échantillonnage
+mesh.py                # numpy/scipy pur : nettoyage du masque, construction du maillage
+stl_io.py              # écriture STL binaire
+tests/
+```
+
+`mesh.py` ne dépend jamais de GDAL ni du disque — testable avec de
+simples tableaux numpy, ce qui permet de vérifier étanchéité et
+cohérence des normales sans jamais ouvrir un fichier.
 
 ## Sources de données compatibles
 
 Testé avec succès sur, entre autres : GSI DEM1A (Japon, XML/JPGIS —
 nécessite un pré-traitement, non inclus ici), IGN LiDAR HD (France),
 USGS 3DEP (États-Unis), swissALTI3D (Suisse), Kartverket LiDAR
-(Norvège), Copernicus GLO-30 (mondial). Toujours vérifier le CRS du
-fichier source (`gdalinfo`) avant utilisation — reprojeter avec
-`gdalwarp` si nécessaire, le script suppose un CRS déjà projeté en
-mètres.
+(Norvège), Copernicus GLO-30 (mondial). Le CRS géographique ou projeté
+est détecté automatiquement (`gdalinfo` reste utile pour vérifier ce
+que contient un fichier avant de s'en servir, mais la reprojection
+manuelle préalable n'est plus nécessaire).
 
 ## Tests
 
@@ -134,6 +159,13 @@ Les tests reproduisent les scénarios synthétiques utilisés pendant le
 développement (île conique, artefact isolé, bruit de surface d'eau
 raccordé au littoral, motif en damier) et vérifient l'étanchéité, la
 cohérence des normales, et le comportement attendu de chaque option.
+
+## Historique des changements notables
+
+- **Restructuration modulaire** (`raster.py`/`mesh.py`/`stl_io.py`) : élimine la duplication qui existait entre l'ancien `circle_dem_to_stl.py` monolithique et `island_dem_to_stl.py`.
+- **Reprojection CRS automatique** : plus besoin de `gdalwarp` manuel avant chaque nouveau site quand la source est en coordonnées géographiques.
+- **`--lat`/`--lon`** en alternative à `--cx`/`--cy`.
+- **`island_dem_to_stl.py` retiré** : son cas d'usage (relief entouré d'eau) est couvert par `--sea-level`, dont l'approche (cercle à mer plate) s'est révélée préférable en pratique à la silhouette exacte du littoral.
 
 ## Licence
 

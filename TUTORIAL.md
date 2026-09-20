@@ -49,6 +49,10 @@ python3 circle_dem_to_stl.py \
     --diameter-mm 60 --base-mm 3 --vexag 1.0
 ```
 
+(`--lat`/`--lon` en WGS84 fonctionnent aussi comme alternative à
+`--cx`/`--cy` — pratique si tu ne connais que les coordonnées
+géographiques du site, y compris quand la source est déjà projetée.)
+
 Tu devrais voir défiler la résolution de ré-échantillonnage, le
 nombre de cellules incluses, puis la construction des parois et
 l'écriture du STL (`colline_disc.stl`, ~280 000 triangles pour cet
@@ -90,30 +94,36 @@ résolution, plus le manque de détail se voit. Un pic isolé avec un
 rayon de 1-2 km mérite du 1-10 m ; un massif entier avec un rayon de
 plusieurs dizaines de km s'accommode très bien de 30 m.
 
-### 2.2 — Toujours vérifier le CRS avant de commencer
+### 2.2 — Vérifier le CRS (utile à connaître, plus bloquant)
 
 ```bash
 gdalinfo mon_fichier.tif | grep -A 15 "Coordinate System is"
 ```
 
-Deux cas possibles :
-- **CRS projeté** (UTM, Lambert93, LV95...) : utilisable directement.
-- **CRS géographique** (degrés de latitude/longitude, souvent WGS84
-  ou NAD83) : il faut reprojeter avant de continuer, sinon `--radius`
-  n'aurait aucun sens (un degré ne vaut pas la même distance en X et en Y).
+Depuis la reprojection automatique, ce n'est plus une étape obligatoire
+avant de lancer le script — si le fichier est en CRS géographique
+(degrés, souvent WGS84 ou NAD83), `circle_dem_to_stl.py` détecte le cas
+et reprojette lui-même à la volée vers la zone UTM appropriée pendant
+le ré-échantillonnage. `gdalinfo` reste utile pour vérifier ce que
+contient un fichier, repérer le nodata déclaré, ou diagnostiquer un
+problème — mais plus pour reprojeter manuellement au préalable.
+
+### 2.3 — Donner le point d'intérêt
+
+Deux façons, au choix :
 
 ```bash
-gdalwarp -t_srs EPSG:<code UTM approprié> -r bilinear \
-    -co COMPRESS=LZW -co TILED=YES \
-    mon_fichier.tif mon_fichier_projete.tif
+# directement en coordonnées géographiques (le plus simple)
+python3 circle_dem_to_stl.py --input mon_fichier.tif --output sortie.stl \
+    --lat <latitude> --lon <longitude> --radius <rayon en m>
+
+# ou dans le CRS déjà projeté du fichier, si tu l'as déjà sous cette forme
+python3 circle_dem_to_stl.py --input mon_fichier.tif --output sortie.stl \
+    --cx <X> --cy <Y> --radius <rayon en m>
 ```
 
-Pour trouver le bon code UTM : la zone se déduit de la longitude
-(`zone = floor((longitude + 180) / 6) + 1`), l'hémisphère du signe de
-la latitude. En cas de doute, un moteur de recherche avec
-"UTM zone <ton pays>" donne la réponse en quelques secondes.
-
-### 2.3 — Convertir le point d'intérêt dans le CRS du fichier
+Si tu dois malgré tout convertir un point à la main pour une autre
+raison (vérifier une distance, par exemple) :
 
 ```bash
 python3 -c "
