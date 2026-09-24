@@ -92,6 +92,27 @@ python circle_dem_to_stl.py \
     --diameter-mm 250 --vexag 1.0
 ```
 
+### Téléchargement Copernicus DEM intégré
+
+Pas de fichier source sous la main ? `--download-copernicus` récupère
+automatiquement les tuiles GLO-30 (30 m, par défaut) ou GLO-90 (90 m)
+nécessaires depuis le compartiment S3 public de Copernicus DEM (accès
+direct, sans compte ni clé API) :
+
+```bash
+python circle_dem_to_stl.py \
+    --download-copernicus --cache-dir ./cache \
+    --lat 35.3606 --lon 138.7274 --radius 9300 \
+    --output relief_disc.stl --diameter-mm 250 --vexag 1.0
+```
+
+Les tuiles sont mises en cache dans `--cache-dir` (une par degré carré,
+réutilisées d'un lancement à l'autre) et assemblées automatiquement en
+mosaïque. Requiert `--lat`/`--lon` (pas `--cx`/`--cy`, puisqu'il faut
+des coordonnées géographiques pour déterminer les tuiles). Les tuiles
+purement océaniques (absentes du compartiment par convention) sont
+ignorées sans faire échouer le téléchargement.
+
 Sans `--diameter-mm`, `--base-mm` ni `--vexag`, le script les demande de
 façon interactive au lancement.
 
@@ -122,6 +143,9 @@ python circle_dem_to_stl.py \
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
+| `--download-copernicus` | Télécharge les tuiles Copernicus DEM nécessaires au lieu de fournir `--input` | désactivé |
+| `--copernicus-product` | Résolution Copernicus à télécharger : `30` (GLO-30) ou `90` (GLO-90) | 30 |
+| `--cache-dir` | Dossier de cache des tuiles Copernicus téléchargées | `./copernicus_cache` |
 
 Fournis soit `--cx`/`--cy`, soit `--lat`/`--lon` — pas les deux.
 
@@ -132,6 +156,7 @@ circle_dem_to_stl.py   # argparse, prompts interactifs, orchestration
 raster.py              # GDAL : ouverture, détection/reprojection CRS, ré-échantillonnage
 mesh.py                # numpy/scipy pur : nettoyage du masque, construction du maillage
 stl_io.py              # écriture STL binaire
+download.py            # téléchargement Copernicus DEM (compartiment S3 public)
 tests/
 ```
 

@@ -29,6 +29,7 @@ import sys
 
 import numpy as np
 
+import download
 import mesh
 import raster
 import stl_io
@@ -124,7 +125,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 
 def main():
     p = argparse.ArgumentParser(description="Découpe circulaire d'un DEM + export STL solide.")
-    p.add_argument("--input", required=True)
+    p.add_argument("--input", default=None,
+                    help="GeoTIFF ou VRT source ; omis si --download-copernicus est utilisé")
     p.add_argument("--output", required=True)
     p.add_argument("--cx", type=float, default=None,
                     help="Centre X du cercle, dans le CRS du fichier source")
@@ -152,6 +154,13 @@ def main():
     p.add_argument("--land-threshold", type=float, default=1.0,
                     help="Utilisé avec --sea-level : élévation au-dessus de --sea-level à partir de "
                          "laquelle un pixel est considéré comme terre 'sûre', en m")
+    p.add_argument("--download-copernicus", action="store_true",
+                    help="Télécharge automatiquement les tuiles Copernicus DEM GLO-30 nécessaires "
+                         "(requiert --lat/--lon) au lieu de fournir --input")
+    p.add_argument("--copernicus-product", type=int, choices=[30, 90], default=30,
+                    help="Résolution Copernicus DEM à télécharger : 30 (GLO-30) ou 90 (GLO-90)")
+    p.add_argument("--cache-dir", default="./copernicus_cache",
+                    help="Dossier de cache pour les tuiles Copernicus téléchargées")
     args = p.parse_args()
 
     have_latlon = args.lat is not None and args.lon is not None
@@ -160,6 +169,23 @@ def main():
         sys.exit("Erreur : fournis --cx/--cy OU --lat/--lon, pas les deux.")
     if not have_latlon and not have_xy:
         sys.exit("Erreur : fournis --cx/--cy (CRS du fichier source) ou --lat/--lon (WGS84).")
+
+    if args.download_copernicus:
+        if not have_latlon:
+            sys.exit("Erreur : --download-copernicus requiert --lat/--lon (coordonnées géographiques "
+                      "nécessaires pour déterminer les tuiles à récupérer).")
+        if args.input is not None:
+            sys.exit("Erreur : ne fournis pas --input en même temps que --download-copernicus.")
+        tile_paths = download.download_copernicus(
+            args.lat, args.lon, args.radius, args.cache_dir,
+            product_m=args.copernicus_product, log=raster.log)
+        vrt_path = f"{args.cache_dir.rstrip('/')}/_mosaic.vrt"
+        from osgeo import gdal
+        gdal.BuildVRT(vrt_path, tile_paths)
+        args.input = vrt_path
+        raster.log(f"Mosaïque de {len(tile_paths)} tuile(s) prête : {vrt_path}")
+    elif args.input is None:
+        sys.exit("Erreur : fournis --input, ou utilise --download-copernicus.")
 
     if args.diameter_mm is None:
         args.diameter_mm = ask_float("Diamètre final imprimé (mm)", 250.0)
