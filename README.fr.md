@@ -54,6 +54,21 @@ corrections et *pull requests* sont bienvenus.
 - Diamètre et épaisseur de socle demandés interactivement si omis en
   ligne de commande.
 
+## Galerie
+
+<table>
+<tr>
+<td><img src="screenshots/mont_fuji_5.png" width="400" alt="Disque du Mont Fuji, détail du cratère"></td>
+<td><img src="screenshots/matterhorn_2.png" width="400" alt="Disque du Cervin"></td>
+</tr>
+<tr>
+<td align="center">Mont Fuji — cratère sommital</td>
+<td align="center">Cervin</td>
+</tr>
+</table>
+
+D'autres angles pour chaque site sont disponibles dans [`screenshots/`](screenshots/).
+
 ## Installation
 
 ```bash

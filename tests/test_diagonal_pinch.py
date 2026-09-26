@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from circle_dem_to_stl import fix_diagonal_pinches, erode3x3, dilate3x3  # noqa: E402
+from mesh import fix_diagonal_pinches, erode3x3, dilate3x3  # noqa: E402
 
 
 def test_checkerboard_pattern_is_filled():

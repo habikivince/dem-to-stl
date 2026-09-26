@@ -58,6 +58,21 @@ welcome.
   source tiles).
 - Diameter, base thickness, and vertical exaggeration are prompted for
   interactively if omitted from the command line.
+## Gallery
+
+<table>
+<tr>
+<td><img src="screenshots/mont_fuji_5.png" width="400" alt="Mount Fuji disc, crater detail"></td>
+<td><img src="screenshots/matterhorn_2.png" width="400" alt="Matterhorn disc"></td>
+</tr>
+<tr>
+<td align="center">Mount Fuji — summit crater</td>
+<td align="center">Matterhorn</td>
+</tr>
+</table>
+
+More angles for each site are available in [`screenshots/`](screenshots/).
+
 ## Installation
  
 ```bash

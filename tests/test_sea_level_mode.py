@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from circle_dem_to_stl import build_mesh, write_stl_binary  # noqa: E402
+from circle_dem_to_stl import build_mesh
+from stl_io import write_stl_binary  # noqa: E402
 
 from conftest import (  # noqa: E402
     make_dem_with_isolated_artifact,
@@ -29,7 +30,7 @@ def test_isolated_artifact_flattened_to_sea_level(tmp_path, tmp_stl):
     cx, cy = make_dem_with_isolated_artifact(tif_path, artifact_dist=140.0)
 
     tris = build_mesh(
-        str(tif_path), cx, cy, radius=145, diameter_mm=100, vexag=3.0,
+        str(tif_path), None, None, cx, cy, radius=145, diameter_mm=100, vexag=3.0,
         base_mm=3.0, print_spacing_mm=1.0,
         sea_level=0.0, min_elevation=-50.0, land_threshold=1.0,
     )
@@ -55,7 +56,7 @@ def test_coastal_water_noise_flattened(tmp_path, tmp_stl):
     cx, cy = make_dem_with_coastal_water_noise(tif_path, island_radius=100, noise_out_to=140.0)
 
     tris = build_mesh(
-        str(tif_path), cx, cy, radius=145, diameter_mm=100, vexag=3.0,
+        str(tif_path), None, None, cx, cy, radius=145, diameter_mm=100, vexag=3.0,
         base_mm=3.0, print_spacing_mm=1.0,
         sea_level=0.0, min_elevation=-50.0, land_threshold=1.0,
     )

@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from circle_dem_to_stl import build_mesh, write_stl_binary  # noqa: E402
+from circle_dem_to_stl import build_mesh
+from stl_io import write_stl_binary  # noqa: E402
 
 from conftest import (  # noqa: E402
     make_cone_dem,
@@ -25,7 +26,7 @@ def test_cone_watertight_and_normals_consistent(tmp_path, tmp_stl):
     cx, cy = make_cone_dem(tif_path)
 
     tris = build_mesh(
-        str(tif_path), cx, cy, radius=140, diameter_mm=56, vexag=3.0,
+        str(tif_path), None, None, cx, cy, radius=140, diameter_mm=56, vexag=3.0,
         base_mm=3.0, print_spacing_mm=0.5,
         sea_level=0.0, min_elevation=-50.0,
     )
@@ -47,7 +48,7 @@ def test_cone_peak_height_matches_scale(tmp_path, tmp_stl):
     scale = (diameter_mm / 2.0) / radius_m
 
     tris = build_mesh(
-        str(tif_path), cx, cy, radius=radius_m, diameter_mm=diameter_mm, vexag=vexag,
+        str(tif_path), None, None, cx, cy, radius=radius_m, diameter_mm=diameter_mm, vexag=vexag,
         base_mm=3.0, print_spacing_mm=0.5,
         sea_level=0.0, min_elevation=-50.0,
     )
@@ -64,7 +65,7 @@ def test_base_thickness_applied(tmp_path, tmp_stl):
     cx, cy = make_cone_dem(tif_path)
 
     tris = build_mesh(
-        str(tif_path), cx, cy, radius=140, diameter_mm=56, vexag=1.0,
+        str(tif_path), None, None, cx, cy, radius=140, diameter_mm=56, vexag=1.0,
         base_mm=7.5, print_spacing_mm=1.0,
         sea_level=0.0, min_elevation=-50.0,
     )
