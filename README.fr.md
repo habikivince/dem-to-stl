@@ -1,5 +1,7 @@
 # dem-to-stl
 
+*[English version](README.md)*
+
 Découpe un modèle numérique de terrain (DEM/MNT, GeoTIFF projeté en
 mètres) selon un cercle, et exporte un maillage **STL solide et
 étanche** (relief + paroi verticale + fond plat), prêt pour
