@@ -13,6 +13,115 @@ import numpy as np
 from scipy import ndimage
 
 
+def trace_boundary_loop(quad_ok):
+    """Trace la boucle fermée simple formant le contour du masque de
+    cellules incluses (quad_ok), en suivant les arêtes de bord — les
+    mêmes arêtes que celles où build_mesh_from_arrays construit
+    normalement la paroi verticale. Retourne la liste ordonnée des
+    points de grille (i, j) formant le contour.
+
+    Suppose une région simplement connexe à un seul contour — lève une
+    ValueError explicite sinon (chaque point de bord doit avoir
+    exactement 2 arêtes de bord incidentes) plutôt que de produire un
+    résultat silencieusement incorrect. C'est le cas normal après
+    clean_mask() pour un disque ou une île simple ; une topologie plus
+    complexe (plusieurs îles séparées, un contour qui se referme sur
+    lui-même) n'est pas supportée par --smooth-wall."""
+    H1, W1 = quad_ok.shape
+    edges = []
+    for i in range(H1):
+        for j in range(W1 + 1):
+            left = quad_ok[i, j - 1] if j > 0 else False
+            right = quad_ok[i, j] if j < W1 else False
+            if left != right:
+                edges.append(((i, j), (i + 1, j)))
+    for j in range(W1):
+        for i in range(H1 + 1):
+            up = quad_ok[i - 1, j] if i > 0 else False
+            down = quad_ok[i, j] if i < H1 else False
+            if up != down:
+                edges.append(((i, j), (i, j + 1)))
+
+    adjacency = {}
+    for a, b in edges:
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+
+    for v, nbrs in adjacency.items():
+        if len(nbrs) != 2:
+            raise ValueError(
+                f"--smooth-wall requiert un contour unique et simple : le point de grille {v} "
+                f"a {len(nbrs)} arête(s) de bord au lieu de 2 (topologie trop complexe : "
+                "plusieurs composantes, ou contour non simple)."
+            )
+
+    start = next(iter(adjacency))
+    loop = [start]
+    prev = None
+    current = start
+    max_len = 4 * (H1 + 1) * (W1 + 1)
+    while True:
+        nbrs = adjacency[current]
+        nxt = nbrs[0] if nbrs[0] != prev else nbrs[1]
+        if nxt == start:
+            break
+        loop.append(nxt)
+        prev, current = current, nxt
+        if len(loop) > max_len:
+            raise ValueError("--smooth-wall : le contour ne s'est pas refermé (masque probablement "
+                              "non simplement connexe).")
+    return loop
+
+
+def build_smooth_rim(loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm):
+    """Construit le raccord lisse entre le contour en escalier du masque
+    nettoyé et le vrai cercle : chaque point du contour est projeté
+    radialement (même hauteur) vers le cercle de rayon radius_mm, puis
+    relié au socle. Remplace la paroi verticale habituelle (qui partait
+    directement du contour en escalier) — ne pas construire les deux
+    pour les mêmes arêtes.
+
+    Retourne (band_tris, wall_tris, bottom_band_tris) — trois listes de
+    triangles (chaque triangle = 3 tuples (x, y, z)) :
+      - band_tris   : bande dessus, contour en escalier -> cercle vrai (hauteur réelle)
+      - wall_tris   : paroi verticale, cercle vrai (hauteur réelle) -> socle
+      - bottom_band_tris : bande dessous, plate, contour en escalier -> cercle vrai
+    """
+    loop_xyz = [(Xmm[j], Ymm[i], z_top_mm[i, j]) for i, j in loop_ij]
+    n = len(loop_xyz)
+
+    projected = []
+    for x, y, z in loop_xyz:
+        r = np.hypot(x, y)
+        if r < 1e-9:
+            projected.append((0.0, 0.0, z))
+        else:
+            s = radius_mm / r
+            projected.append((x * s, y * s, z))
+
+    zb = -base_mm
+    band_tris, wall_tris, bottom_band_tris = [], [], []
+    for k in range(n):
+        k2 = (k + 1) % n
+        a, b = loop_xyz[k], loop_xyz[k2]
+        pa, pb = projected[k], projected[k2]
+
+        band_tris.append((a, b, pa))
+        band_tris.append((b, pb, pa))
+
+        pa_base = (pa[0], pa[1], zb)
+        pb_base = (pb[0], pb[1], zb)
+        wall_tris.append((pa, pb, pa_base))
+        wall_tris.append((pb, pb_base, pa_base))
+
+        a_base = (a[0], a[1], zb)
+        b_base = (b[0], b[1], zb)
+        bottom_band_tris.append((b_base, a_base, pa_base))
+        bottom_band_tris.append((pb_base, b_base, pa_base))
+
+    return band_tris, wall_tris, bottom_band_tris
+
+
 def erode3x3(m):
     """Érosion binaire 3x3 (tous les voisins doivent être True pour survivre)."""
     p = np.pad(m, 1, constant_values=False)
@@ -73,13 +182,19 @@ def largest_connected_component(seed_mask):
     return labeled == largest_label, n_components, sizes
 
 
-def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev, progress=None):
+def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev,
+                            progress=None, smooth_wall=False, circle_radius_mm=None):
     """Construit le maillage (triangles dessus/dessous/parois) à partir d'un
     tableau d'altitudes déjà découpé et d'un masque de cellules (quad_ok)
     déjà nettoyé. Ne touche jamais au disque ni à GDAL — testable avec de
     simples tableaux numpy. quad_ok doit avoir la forme (H-1, W-1) par
     rapport à elev. xs/ys doivent déjà être recentrées sur le centre du
-    cercle (en unités du CRS source, pas encore mises à l'échelle)."""
+    cercle (en unités du CRS source, pas encore mises à l'échelle).
+
+    smooth_wall=True : au lieu de suivre le contour en escalier du masque,
+    chaque point du contour est projeté radialement vers le vrai cercle
+    (même altitude), formant un bord parfaitement circulaire. Requiert un
+    masque à un seul contour simple (voir trace_boundary_loop)."""
     def _progress(i, n, label):
         if progress is not None:
             progress(i, n, label)
@@ -113,6 +228,18 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
         np.stack([c00b, c01b, c10b], axis=1),
         np.stack([c10b, c01b, c11b], axis=1),
     ])
+
+    if smooth_wall:
+        loop_ij = trace_boundary_loop(quad_ok)
+        if circle_radius_mm is None:
+            raise ValueError("smooth_wall=True nécessite circle_radius_mm (le vrai rayon, en mm).")
+        radius_mm = circle_radius_mm
+        band_tris, wall_tris, bottom_band_tris = build_smooth_rim(
+            loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm)
+        extra_tris = np.array(band_tris + bottom_band_tris, dtype=np.float64)
+        wall_tris = np.array(wall_tris, dtype=np.float64)
+        all_tris = np.concatenate([top_tris, bot_tris, extra_tris, wall_tris])
+        return all_tris, len(top_tris), len(bot_tris) + len(bottom_band_tris) + len(band_tris), len(wall_tris)
 
     wall_tris = []
 

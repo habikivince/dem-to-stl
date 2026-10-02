@@ -61,7 +61,8 @@ def ask_float(question, default):
 
 
 def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
-                print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0):
+                print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
+                smooth_wall=False):
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     scale = (diameter_mm / 2.0) / radius
@@ -118,7 +119,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
     min_elev = sea_level if sea_level is not None else elev[clean_mask].min()
 
     tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
-        elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress)
+        elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
+        smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None))
     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
     return tris
 
@@ -154,6 +156,10 @@ def main():
     p.add_argument("--land-threshold", type=float, default=1.0,
                     help="Utilisé avec --sea-level : élévation au-dessus de --sea-level à partir de "
                          "laquelle un pixel est considéré comme terre 'sûre', en m")
+    p.add_argument("--smooth-wall", action="store_true",
+                    help="Bord parfaitement circulaire (contour en escalier projeté radialement "
+                         "vers le vrai cercle) au lieu de suivre la grille de ré-échantillonnage. "
+                         "Requiert un masque à un seul contour simple.")
     p.add_argument("--download-copernicus", action="store_true",
                     help="Télécharge automatiquement les tuiles Copernicus DEM GLO-30 nécessaires "
                          "(requiert --lat/--lon) au lieu de fournir --input")
@@ -197,7 +203,7 @@ def main():
     tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
                        args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
                        sea_level=args.sea_level, min_elevation=args.min_elevation,
-                       land_threshold=args.land_threshold)
+                       land_threshold=args.land_threshold, smooth_wall=args.smooth_wall)
     stl_io.write_stl_binary(tris, args.output, progress=progress)
     log(f"Terminé : {args.output}")
 
