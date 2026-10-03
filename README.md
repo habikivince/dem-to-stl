@@ -187,6 +187,37 @@ is detected automatically (`gdalinfo` remains useful for checking what
 a file actually contains, but manual reprojection beforehand is no
 longer necessary).
  
+## Automatic national sources (`--source`)
+
+With `--lat/--lon`, the DEM can be fetched automatically instead of
+passing `--input`:
+
+```
+python circle_dem_to_stl.py --source auto --lat 46.0 --lon 7.6 --radius 5000 --output out.stl
+```
+
+| `--source` | Provider | Access method |
+|---|---|---|
+| `swisstopo` | swissALTI3D (Switzerland) | STAC API, 0.5 m / 2 m GeoTIFF tiles |
+| `kartverket` | Høydedata DTM1 (Norway) | WCS, resampled to the working resolution |
+| `usgs` | 3DEP (United States) | TNM Access API, partial reads via `/vsicurl/` |
+| `gsi` | GSI elevation tiles (Japan) | PNG tiles (DEM1A → DEM5A/5B → DEM10B), Web Mercator |
+| `ign` | LiDAR HD MNT 0.5 m, fallback RGE ALTI 1 m (France, La Réunion) | WMS-R, raw float GeoTIFF; rendered/hillshade answers are rejected |
+| `copernicus` | GLO-30/90 (worldwide) | same as `--download-copernicus` |
+| `auto` | national source covering the point, otherwise Copernicus | — |
+
+The resolution fetched follows the working pixel size (derived from
+`--diameter-mm`, `--radius` and `--print-spacing-mm`), so no 1 m data is
+downloaded when a 15 m grid is enough. Data is cached under `--cache-dir`.
+
+**Status.** These providers were written from official documentation but
+could not be tested against the live servers in the development
+environment (tests use simulated HTTP). USGS dataset names and the
+Kartverket coverage name in particular should be confirmed on first real
+use. Kartverket and IGN (WCS/WMS servers whose exact request syntax could not be confirmed) try several request variants and log the one accepted; IGN LiDAR HD coverage of France is still incomplete (a warning reports the share of the disc without data). GSI's FGD XML
+download requires a login and is not automated; the tile service is used
+instead (interpolated values, not the raw JPGIS mesh).
+
 ## Tests
  
 ```bash

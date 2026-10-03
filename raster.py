@@ -19,6 +19,22 @@ def log(msg):
     print(f"[DEM2STL] {msg}", flush=True)
 
 
+def _primary(input_path):
+    """input_path peut être un chemin unique ou une liste de rasters (sources
+    nationales, éventuellement dans des CRS différents) : on utilise le
+    premier pour lire CRS et nodata, gdal.Warp se charge du reste."""
+    return input_path[0] if isinstance(input_path, (list, tuple)) else input_path
+
+
+def _is_web_mercator(srs):
+    """EPSG:3857 est « projeté » mais ses mètres sont dilatés de 1/cos(lat) :
+    inutilisable comme CRS de travail métrique."""
+    ref = osr.SpatialReference()
+    ref.ImportFromEPSG(3857)
+    ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return bool(srs.IsSame(ref))
+
+
 def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
     """
     Détermine le CRS de travail (toujours projeté, en mètres) et le
@@ -35,7 +51,7 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
 
     Retourne (dst_srs_wkt, cx, cy) où cx/cy sont dans dst_srs_wkt.
     """
-    ds = gdal.Open(input_path)
+    ds = gdal.Open(_primary(input_path))
     src_srs = osr.SpatialReference()
     src_srs.ImportFromWkt(ds.GetProjection())
     src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
@@ -45,18 +61,27 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
     if not have_latlon and not have_xy:
         sys.exit("Erreur interne : ni --cx/--cy ni --lat/--lon résolus avant resolve_target_crs_and_center.")
 
-    if src_srs.IsGeographic():
+    web_mercator = (not src_srs.IsGeographic()) and _is_web_mercator(src_srs)
+    if src_srs.IsGeographic() or web_mercator:
         # Point de référence pour déterminer la zone UTM : --lat/--lon en
         # priorité, sinon --cx/--cy réinterprétés comme lon/lat (ils sont
-        # nécessairement dans ce système si la source l'est).
-        ref_lon, ref_lat = (lon, lat) if have_latlon else (cx, cy)
+        # nécessairement dans ce système si la source l'est ; en Web Mercator
+        # ils sont d'abord reconvertis en lon/lat).
+        if have_latlon:
+            ref_lon, ref_lat = lon, lat
+        elif web_mercator:
+            wm_to_geo = osr.CoordinateTransformation(src_srs, _wgs84())
+            ref_lon, ref_lat, _ = wm_to_geo.TransformPoint(cx, cy)
+        else:
+            ref_lon, ref_lat = cx, cy
 
         utm_zone = int((ref_lon + 180) / 6) + 1
         dst_epsg = (32600 if ref_lat >= 0 else 32700) + utm_zone
         dst_srs = osr.SpatialReference()
         dst_srs.ImportFromEPSG(dst_epsg)
         dst_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        log(f"CRS source géographique détecté -> reprojection à la volée vers "
+        kind = "Web Mercator (EPSG:3857, mètres non métriques)" if web_mercator else "géographique"
+        log(f"CRS source {kind} détecté -> reprojection à la volée vers "
             f"UTM {utm_zone}{'N' if ref_lat >= 0 else 'S'} (EPSG:{dst_epsg})")
 
         wgs84 = osr.SpatialReference()
@@ -79,13 +104,20 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
     return src_srs.ExportToWkt(), cx, cy
 
 
+def _wgs84():
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return srs
+
+
 def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
     reprojection et découpe en une seule passe, donc même une source
     volumineuse en CRS géographique n'est jamais traitée en entier."""
-    ds = gdal.Open(input_path)
+    ds = gdal.Open(_primary(input_path))
     nodata = ds.GetRasterBand(1).GetNoDataValue()
 
     xmin, xmax = cx - radius, cx + radius

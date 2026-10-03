@@ -191,6 +191,38 @@ est détecté automatiquement (`gdalinfo` reste utile pour vérifier ce
 que contient un fichier avant de s'en servir, mais la reprojection
 manuelle préalable n'est plus nécessaire).
 
+## Sources nationales automatiques (`--source`)
+
+Avec `--lat/--lon`, le DEM peut être récupéré automatiquement au lieu de
+fournir `--input` :
+
+```
+python circle_dem_to_stl.py --source auto --lat 46.0 --lon 7.6 --radius 5000 --output out.stl
+```
+
+| `--source` | Fournisseur | Méthode d'accès |
+|---|---|---|
+| `swisstopo` | swissALTI3D (Suisse) | API STAC, tuiles GeoTIFF 0,5 m / 2 m |
+| `kartverket` | Høydedata DTM1 (Norvège) | WCS, ré-échantillonné à la résolution de travail |
+| `usgs` | 3DEP (États-Unis) | API TNM Access, lecture partielle via `/vsicurl/` |
+| `gsi` | Tuiles d'élévation GSI (Japon) | tuiles PNG (DEM1A → DEM5A/5B → DEM10B), Web Mercator |
+| `ign` | MNT LiDAR HD 0,5 m, repli RGE ALTI 1 m (France, La Réunion) | WMS-R, GeoTIFF flottant brut ; les images rendues/estompées sont rejetées |
+| `copernicus` | GLO-30/90 (monde) | identique à `--download-copernicus` |
+| `auto` | source nationale couvrant le point, sinon Copernicus | — |
+
+La résolution récupérée suit la résolution de travail (déduite de
+`--diameter-mm`, `--radius` et `--print-spacing-mm`) : pas de 1 m
+téléchargé quand une grille de 15 m suffit. Les données sont mises en
+cache dans `--cache-dir`.
+
+**État.** Ces fournisseurs ont été écrits d'après la documentation
+officielle mais n'ont pas pu être testés sur les serveurs réels dans
+l'environnement de développement (les tests utilisent du HTTP simulé).
+Les noms de jeux de données USGS et le nom de couverture Kartverket en
+particulier sont à confirmer au premier usage réel. Kartverket et IGN (serveurs WCS/WMS dont la syntaxe exacte n'a pas pu être confirmée) essaient plusieurs variantes de requête et journalisent celle acceptée ; la couverture LiDAR HD de la France est encore incomplète (un avertissement indique la part du disque sans donnée). Le téléchargement XML FGD de
+GSI exige un compte et n'est pas automatisé ; le service de tuiles est
+utilisé à la place (valeurs interpolées, pas le maillage JPGIS brut).
+
 ## Tests
 
 ```bash

@@ -12,11 +12,13 @@ Convention de nommage confirmée sur https://copernicus-dem-30m.s3.amazonaws.com
 """
 import math
 import os
+import shutil
 import urllib.request
 import urllib.error
 
 BUCKETS = {30: "copernicus-dem-30m", 90: "copernicus-dem-90m"}
 RESOLUTIONS_ARCSEC = {30: 10, 90: 30}
+HTTP_TIMEOUT = 60
 
 
 def tile_name(lat_deg, lon_deg, product_m=30):
@@ -74,6 +76,7 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
     log(f"{len(needed)} tuile(s) Copernicus GLO-{product_m} nécessaire(s) pour ce rayon")
 
     paths = []
+    failed = []
     for lat_deg, lon_deg in needed:
         name = tile_name(lat_deg, lon_deg, product_m)
         local_path = os.path.join(cache_dir, f"{name}.tif")
@@ -83,18 +86,31 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
             continue
 
         url = tile_url(lat_deg, lon_deg, product_m)
+        part = local_path + ".part"
         try:
             log(f"  {name} : téléchargement...")
-            urllib.request.urlretrieve(url, local_path)
+            req = urllib.request.Request(url, headers={"User-Agent": "dem-to-stl"})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp, open(part, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            os.replace(part, local_path)  # écriture atomique : jamais de .tif partiel en cache
             paths.append(local_path)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 log(f"  {name} : absente (probablement océan) — ignorée")
             else:
-                log(f"  {name} : échec HTTP {e.code} — ignorée")
-            if os.path.exists(local_path):
-                os.remove(local_path)  # évite un fichier partiel/corrompu en cache
+                log(f"  {name} : échec HTTP {e.code}")
+                failed.append(name)
+        except OSError as e:  # URLError, timeout, connexion coupée
+            log(f"  {name} : échec réseau ({e})")
+            failed.append(name)
+        finally:
+            if os.path.exists(part):
+                os.remove(part)
 
+    if failed:
+        # Une tuile manquante pour une autre raison qu'un 404 laisserait un trou
+        # silencieux dans le relief : on préfère échouer explicitement.
+        raise RuntimeError("Téléchargement Copernicus incomplet, tuile(s) en échec : " + ", ".join(failed))
     if not paths:
         raise RuntimeError("Aucune tuile Copernicus n'a pu être obtenue pour cette zone.")
     return paths

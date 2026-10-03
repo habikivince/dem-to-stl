@@ -32,6 +32,7 @@ import numpy as np
 import download
 import mesh
 import raster
+import sources
 import stl_io
 
 log = raster.log
@@ -128,7 +129,7 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 def main():
     p = argparse.ArgumentParser(description="Découpe circulaire d'un DEM + export STL solide.")
     p.add_argument("--input", default=None,
-                    help="GeoTIFF ou VRT source ; omis si --download-copernicus est utilisé")
+                    help="GeoTIFF ou VRT source ; omis si --source / --download-copernicus est utilisé")
     p.add_argument("--output", required=True)
     p.add_argument("--cx", type=float, default=None,
                     help="Centre X du cercle, dans le CRS du fichier source")
@@ -161,12 +162,15 @@ def main():
                          "vers le vrai cercle) au lieu de suivre la grille de ré-échantillonnage. "
                          "Requiert un masque à un seul contour simple.")
     p.add_argument("--download-copernicus", action="store_true",
-                    help="Télécharge automatiquement les tuiles Copernicus DEM GLO-30 nécessaires "
-                         "(requiert --lat/--lon) au lieu de fournir --input")
+                    help="Équivalent de --source copernicus (conservé pour compatibilité)")
+    p.add_argument("--source", choices=["auto", "copernicus"] + sorted(sources.SOURCES), default=None,
+                    help="Télécharge automatiquement le DEM (requiert --lat/--lon) au lieu de fournir "
+                         "--input : une source nationale (swisstopo, kartverket, usgs, gsi), copernicus "
+                         "(mondial), ou auto (source nationale couvrant le point, sinon Copernicus)")
     p.add_argument("--copernicus-product", type=int, choices=[30, 90], default=30,
                     help="Résolution Copernicus DEM à télécharger : 30 (GLO-30) ou 90 (GLO-90)")
     p.add_argument("--cache-dir", default="./copernicus_cache",
-                    help="Dossier de cache pour les tuiles Copernicus téléchargées")
+                    help="Dossier de cache des données téléchargées (Copernicus et sources nationales)")
     args = p.parse_args()
 
     have_latlon = args.lat is not None and args.lon is not None
@@ -176,29 +180,33 @@ def main():
     if not have_latlon and not have_xy:
         sys.exit("Erreur : fournis --cx/--cy (CRS du fichier source) ou --lat/--lon (WGS84).")
 
-    if args.download_copernicus:
+    source = args.source or ("copernicus" if args.download_copernicus else None)
+    if args.source and args.download_copernicus and args.source != "copernicus":
+        sys.exit("Erreur : --download-copernicus est incompatible avec --source " + args.source + ".")
+    if source:
         if not have_latlon:
-            sys.exit("Erreur : --download-copernicus requiert --lat/--lon (coordonnées géographiques "
-                      "nécessaires pour déterminer les tuiles à récupérer).")
+            sys.exit("Erreur : --source / --download-copernicus requiert --lat/--lon (coordonnées "
+                      "géographiques nécessaires pour déterminer les données à récupérer).")
         if args.input is not None:
-            sys.exit("Erreur : ne fournis pas --input en même temps que --download-copernicus.")
-        tile_paths = download.download_copernicus(
-            args.lat, args.lon, args.radius, args.cache_dir,
-            product_m=args.copernicus_product, log=raster.log)
-        vrt_path = f"{args.cache_dir.rstrip('/')}/_mosaic.vrt"
-        from osgeo import gdal
-        gdal.BuildVRT(vrt_path, tile_paths)
-        args.input = vrt_path
-        raster.log(f"Mosaïque de {len(tile_paths)} tuile(s) prête : {vrt_path}")
+            sys.exit("Erreur : ne fournis pas --input en même temps que --source / --download-copernicus.")
     elif args.input is None:
-        sys.exit("Erreur : fournis --input, ou utilise --download-copernicus.")
+        sys.exit("Erreur : fournis --input, ou utilise --source (ou --download-copernicus).")
 
+    # Paramètres d'impression demandés AVANT le téléchargement : la résolution de
+    # travail (pixel_size_m) en découle et sert à choisir la résolution à récupérer.
     if args.diameter_mm is None:
         args.diameter_mm = ask_float("Diamètre final imprimé (mm)", 250.0)
     if args.base_mm is None:
         args.base_mm = ask_float("Épaisseur du socle plat (mm)", 3.0)
     if args.vexag is None:
         args.vexag = ask_float("Exagération verticale", 1.0)
+
+    if source:
+        pixel_size_m = args.print_spacing_mm / ((args.diameter_mm / 2.0) / args.radius)
+        used, args.input = sources.acquire(
+            source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
+            copernicus_product=args.copernicus_product, log=raster.log)
+        raster.log(f"source utilisée : {used}")
 
     tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
                        args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
