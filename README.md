@@ -218,6 +218,56 @@ use. Kartverket and IGN (WCS/WMS servers whose exact request syntax could not be
 download requires a login and is not automated; the tile service is used
 instead (interpolated values, not the raw JPGIS mesh).
 
+### Place names (`--place`)
+
+Instead of coordinates, give a place name; it is resolved with Nominatim
+(OpenStreetMap) and, without `--input`/`--source`, the DEM source is chosen
+automatically:
+
+```
+python circle_dem_to_stl.py --place "Mont Fuji" --radius 9300 --diameter-mm 250 --output fuji.stl
+```
+
+The first result (Nominatim's relevance order) is used; the other candidates
+are listed in the log and `--place-pick N` selects another one. Administrative
+areas and islands resolve to their centre, not to a summit: the log warns, and
+`--lat/--lon` stays available for exact points. The public Nominatim server
+allows 1 request per second and expects an identifying User-Agent (override with
+`DEM2STL_USER_AGENT`, ideally with a contact); results are cached under
+`--cache-dir`. Geocoding data © OpenStreetMap contributors (ODbL).
+
+### Resolution and quality of automatic sources
+
+The mesh is limited by `--print-spacing-mm`: the DEM is resampled (`average`) to
+`print-spacing / scale` metres per pixel (shown as "résolution de ré-échantillonnage"
+in the log, e.g. 8 m for a 150 mm print of a 3 km radius). Sources therefore fetch
+only the resolution needed for that grid (swisstopo 2 m instead of 0.5 m, GSI tiles
+at the matching zoom, WCS/WMS requests at 2x the working resolution), which is why
+cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
+2 m data down to 8 m gives nearly the same grid.
+
+* `--full-res` fetches each source's finest resolution (heavy downloads, same mesh
+  size). Kartverket and IGN otherwise resample server-side (nearest neighbour) at
+  twice the working resolution before averaging; `--full-res` removes that shortcut.
+* GSI elevation tiles are derived from the DEM (interpolated, 1 cm steps), not the
+  raw JPGIS mesh; the number of tiles is capped, so very large areas use a coarser zoom.
+* `compare_dems.py A B --lat .. --lon .. --radius .. --pixel-size ..` measures the
+  difference between two DEMs on the working grid (mean offset, RMS, 95th percentile)
+  to check an automatic source against manually downloaded data.
+
+### Filling gaps with Copernicus (`--fill-with-copernicus`)
+
+National sources stop at their border (e.g. swissALTI3D at the Italian side of the
+Matterhorn) and some are incomplete (IGN LiDAR HD). With `--fill-with-copernicus`
+(needs `--lat/--lon` or `--place`; works with `--source` or `--input`), parts of the
+disc without data are filled from Copernicus GLO-30, which is downloaded only if
+there are gaps. Copernicus is first shifted in altitude by the median difference
+measured on the area both rasters cover (logged, with its interquartile range); the
+fill is abandoned if that shift exceeds 50 m. Limits: Copernicus is a surface model
+(trees, buildings) at 30 m, the national data are usually bare-earth, so the
+junction shows a resolution and character change; the log reports the share of the
+disc filled.
+
 ## Tests
  
 ```bash

@@ -648,3 +648,100 @@ def test_cli_rejects_source_with_input(monkeypatch, tmp_path):
                                       "--radius", "500", "--output", str(tmp_path / "o.stl")])
     with pytest.raises(SystemExit):
         circle_dem_to_stl.main()
+
+
+# ---------------------------------------------------------------- résolution / qualité
+
+def test_usgs_tries_1m_whenever_working_pixel_is_below_threshold(monkeypatch):
+    queried = []
+
+    def fake_json(url, params=None):
+        queried.append(params["datasets"])
+        return {"total": 1, "items": [_prod("https://s/a.tif", "2022-01-01")]}
+
+    monkeypatch.setattr(sources, "_http_json", fake_json)
+    sources.fetch_usgs(37.7, -119.6, 3000, "unused", 8.0, log=quiet)   # 8 m de travail : 1 m disponible -> 1 m
+    assert queried[0] == sources.USGS_DATASETS_1M[0]
+    queried.clear()
+    sources.fetch_usgs(37.7, -119.6, 9000, "unused", 15.0, log=quiet)  # 15 m : le ~10 m suffit
+    assert queried[0] == sources.USGS_DATASETS_13[0]
+
+
+def test_full_res_asks_every_source_for_its_finest_resolution(tmp_path, monkeypatch):
+    lat, lon = 46.0, 7.6
+    x, y = sources._to_epsg(2056, lat, lon)
+    tif = tmp_path / "ch.tif"
+    write_synthetic_tif(tif, np.full((1500, 1500), 1500.0), x - 1500.0, y + 1500.0, 2.0, 2056)
+    seen = []
+
+    def fake_fetch(lat_, lon_, radius_m, cache_dir, pixel_size_m, log=print):
+        seen.append(pixel_size_m)
+        return [str(tif)]
+
+    monkeypatch.setitem(sources.SOURCES, "swisstopo", sources.Source("swisstopo", "x", [(5, 45, 11, 48)], fake_fetch))
+    base = ["x", "--source", "swisstopo", "--lat", str(lat), "--lon", str(lon), "--radius", "500",
+            "--diameter-mm", "50", "--vexag", "1", "--base-mm", "2", "--print-spacing-mm", "0.5",
+            "--cache-dir", str(tmp_path / "c")]
+    monkeypatch.setattr(sys, "argv", base + ["--output", str(tmp_path / "a.stl")])
+    circle_dem_to_stl.main()
+    monkeypatch.setattr(sys, "argv", base + ["--full-res", "--output", str(tmp_path / "b.stl")])
+    circle_dem_to_stl.main()
+    assert seen[0] == pytest.approx(10.0) and seen[1] == sources.FULL_RES_PIXEL_M
+    # le maillage, lui, reste identique : même nombre de triangles
+    assert (tmp_path / "a.stl").stat().st_size == (tmp_path / "b.stl").stat().st_size
+    assert sources.swisstopo_gsd(sources.FULL_RES_PIXEL_M) == 0.5
+
+
+def test_compare_dems_reports_offset_and_small_scatter(tmp_path):
+    import compare_dems
+
+    def terrain(x, y):
+        return 1000.0 + 0.05 * (x - 2600000) + 0.02 * (y - 1200000) + 15.0 * np.sin((x - 2600000) / 300.0)
+
+    def write(path, pixel, offset):
+        n = int(4000 / pixel)
+        xs = 2600000.0 + (np.arange(n) + 0.5) * pixel
+        ys = 1204000.0 - (np.arange(n) + 0.5) * pixel
+        xx, yy = np.meshgrid(xs, ys)
+        write_synthetic_tif(path, (terrain(xx, yy) + offset).astype(np.float32), 2600000.0, 1204000.0, pixel, 2056)
+
+    a, b = tmp_path / "fine.tif", tmp_path / "coarse.tif"
+    write(a, 0.5, 0.0)
+    write(b, 2.0, 3.0)
+    s = compare_dems.compare_dems(str(a), str(b), None, None, 2602000.0, 1202000.0, 1500.0, 8.0)
+    assert s["mean"] == pytest.approx(3.0, abs=0.05)
+    assert s["std"] < 0.2 and s["cells_both"] > 0.95 * s["cells_disc"]
+    assert s["relief_a_m"] > 50
+
+
+def test_compare_dems_without_overlap_is_an_error(tmp_path):
+    import compare_dems
+    a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+    write_synthetic_tif(a, np.full((100, 100), 10.0), 2600000.0, 1200100.0, 2.0, 2056)
+    write_synthetic_tif(b, np.full((100, 100), 10.0), 2650000.0, 1250100.0, 2.0, 2056)
+    with pytest.raises(ValueError):
+        compare_dems.compare_dems(str(a), str(b), None, None, 2600100.0, 1200000.0, 90.0, 8.0)
+
+
+def test_compare_dems_ignores_filled_halo_of_the_smaller_raster(tmp_path):
+    """A ne couvre qu'une partie du disque : la comparaison ne doit porter que sur les
+    cellules réellement mesurées (pas sur les 50 pixels que FillNodata inventerait)."""
+    import compare_dems
+
+    def terrain(x, y):
+        return 1000.0 + 0.05 * (x - 2600000) + 0.02 * (y - 1200000)
+
+    def write(path, x_min, x_max, pixel):
+        n_x, n_y = int((x_max - x_min) / pixel), int(4000 / pixel)
+        xs = x_min + (np.arange(n_x) + 0.5) * pixel
+        ys = 1204000.0 - (np.arange(n_y) + 0.5) * pixel
+        xx, yy = np.meshgrid(xs, ys)
+        write_synthetic_tif(path, terrain(xx, yy).astype(np.float32), x_min, 1204000.0, pixel, 2056)
+
+    a, b = tmp_path / "half.tif", tmp_path / "full.tif"
+    write(a, 2600000.0, 2602000.0, 2.0)        # moitié ouest seulement
+    write(b, 2600000.0, 2604000.0, 2.0)
+    s = compare_dems.compare_dems(str(a), str(b), None, None, 2602000.0, 1202000.0, 1500.0, 8.0)
+    assert s["cells_only_b"] > 0.4 * s["cells_disc"]   # la moitié est du disque n'existe que dans B
+    assert s["cells_only_a"] == 0
+    assert s["max_abs"] < 0.5                           # aucune différence inventée par le comblement

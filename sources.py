@@ -42,9 +42,11 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 osr.UseExceptions()
 
-USER_AGENT = "dem-to-stl"
+USER_AGENT = os.environ.get("DEM2STL_USER_AGENT", "dem-to-stl/1.0")
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3
+FULL_RES_PIXEL_M = 0.1   # « pixel » factice plus fin que toute source : chaque source prend son maximum
+USGS_1M_BELOW_PIXEL_M = 12.0
 NODATA = -9999.0
 
 
@@ -545,7 +547,7 @@ def _tnm_query(datasets, bbox):
 def fetch_usgs(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
     bbox = circle_bbox_wgs84(lat, lon, radius_m)
     attempts = []
-    if pixel_size_m < 5.0:
+    if pixel_size_m < USGS_1M_BELOW_PIXEL_M:
         attempts.append(USGS_DATASETS_1M)
     attempts.append(USGS_DATASETS_13)
     for datasets in attempts:
@@ -703,6 +705,30 @@ SOURCES = {s.name: s for s in [
     Source("ign", "IGN MNT LiDAR HD / RGE ALTI (France)", list(IGN_REGION_BOXES.values()), fetch_ign),
 ]}
 AUTO_ORDER = ["swisstopo", "kartverket", "usgs", "gsi", "ign"]
+
+
+class LayeredInputs(list):
+    """Rasters principaux (liste de chemins GDAL) + `fill_loader`, appelable qui fournit
+    à la demande une source secondaire pour combler les trous (voir raster.warp_window)."""
+    fill_loader = None
+
+
+def with_copernicus_fill(inputs, lat, lon, radius_m, cache_dir, product_m=30, log=print):
+    """Enveloppe `inputs` (chemin ou liste) : Copernicus GLO-30/90 ne sera téléchargé que
+    si le disque a des trous une fois la source principale ré-échantillonnée."""
+    layered = LayeredInputs(list(inputs) if isinstance(inputs, (list, tuple)) else [inputs])
+
+    def loader():
+        import download
+        log("Complément : téléchargement de Copernicus pour combler le disque")
+        tiles = download.download_copernicus(lat, lon, radius_m, cache_dir, product_m=product_m, log=log)
+        os.makedirs(cache_dir, exist_ok=True)
+        vrt = f"{cache_dir.rstrip('/')}/_fill_mosaic.vrt"
+        gdal.BuildVRT(vrt, tiles)
+        return vrt
+
+    layered.fill_loader = loader
+    return layered
 
 
 def acquire(source, lat, lon, radius_m, cache_dir, pixel_size_m, copernicus_product=30, log=print):

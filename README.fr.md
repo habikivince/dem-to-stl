@@ -223,6 +223,61 @@ particulier sont à confirmer au premier usage réel. Kartverket et IGN (serveur
 GSI exige un compte et n'est pas automatisé ; le service de tuiles est
 utilisé à la place (valeurs interpolées, pas le maillage JPGIS brut).
 
+### Noms de lieux (`--place`)
+
+À la place des coordonnées, tu peux donner un nom de lieu ; il est résolu avec
+Nominatim (OpenStreetMap) et, sans `--input` ni `--source`, la source de DEM est
+choisie automatiquement :
+
+```
+python circle_dem_to_stl.py --place "Mont Fuji" --radius 9300 --diameter-mm 250 --output fuji.stl
+```
+
+Le premier résultat (ordre de pertinence de Nominatim) est utilisé ; les autres
+candidats sont listés dans le log et `--place-pick N` en choisit un autre. Une
+zone administrative ou une île se résout à son centre, pas à un sommet : le log
+l'indique, et `--lat/--lon` reste disponible pour un point exact. Le serveur
+public Nominatim limite à 1 requête par seconde et attend un User-Agent
+identifiant (surcharge avec `DEM2STL_USER_AGENT`, idéalement avec un contact) ;
+les résultats sont mis en cache dans `--cache-dir`. Données de géocodage
+© contributeurs OpenStreetMap (ODbL).
+
+### Résolution et qualité des sources automatiques
+
+Le maillage est limité par `--print-spacing-mm` : le DEM est ré-échantillonné
+(`average`) à `print-spacing / échelle` mètres par pixel (affiché comme « résolution
+de ré-échantillonnage » dans le log, par ex. 8 m pour une impression de 150 mm d'un
+rayon de 3 km). Les sources ne récupèrent donc que la résolution utile à cette grille
+(swisstopo 2 m au lieu de 0,5 m, tuiles GSI au zoom correspondant, requêtes WCS/WMS à
+2x la résolution de travail), d'où des fichiers en cache bien plus légers que des
+téléchargements en pleine résolution. Moyenner du 0,5 m ou du 2 m jusqu'à 8 m donne
+une grille quasi identique.
+
+* `--full-res` récupère la résolution la plus fine de chaque source (téléchargements
+  lourds, maillage de même taille). Sans lui, Kartverket et IGN ré-échantillonnent côté
+  serveur (plus proche voisin) à 2x la résolution de travail avant de moyenner ;
+  `--full-res` supprime ce raccourci.
+* Les tuiles d'élévation GSI sont dérivées du DEM (interpolées, pas de 1 cm), pas le
+  maillage JPGIS brut ; leur nombre est plafonné, donc une très grande zone utilise un
+  zoom plus grossier.
+* `compare_dems.py A B --lat .. --lon .. --radius .. --pixel-size ..` mesure l'écart
+  entre deux DEM sur la grille de travail (décalage moyen, RMS, 95e centile), pour
+  valider une source automatique contre des données téléchargées à la main.
+
+### Combler les trous avec Copernicus (`--fill-with-copernicus`)
+
+Les sources nationales s'arrêtent à leur frontière (par ex. swissALTI3D côté
+italien du Cervin) et certaines sont incomplètes (IGN LiDAR HD). Avec
+`--fill-with-copernicus` (requiert `--lat/--lon` ou `--place` ; fonctionne avec
+`--source` ou `--input`), les parties du disque sans donnée sont comblées avec
+Copernicus GLO-30, téléchargé seulement s'il y a des trous. Copernicus est d'abord
+décalé en altitude de la différence médiane mesurée sur la zone couverte par les
+deux rasters (journalisée, avec l'écart interquartile) ; le comblement est abandonné
+si ce décalage dépasse 50 m. Limites : Copernicus est un modèle de surface (arbres,
+bâtiments) à 30 m alors que les données nationales sont en général du sol nu, donc
+le raccord montre un changement de résolution et de nature ; le log indique la part
+du disque comblée.
+
 ## Tests
 
 ```bash

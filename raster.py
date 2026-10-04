@@ -111,14 +111,81 @@ def _wgs84():
     return srs
 
 
-def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None):
+FILL_NODATA = -9999.0       # nodata imposé quand un complément est possible et que la source n'en déclare pas
+FILL_MIN_DISC_COVERAGE = 0.999
+FILL_MAX_OFFSET_M = 50.0
+FILL_MIN_OVERLAP_CELLS = 100
+
+
+def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, nodata, cx, cy, radius):
+    """Comble les cellules du disque sans donnée avec une source secondaire grossière
+    (Copernicus), recalée en altitude sur la source principale d'après leur zone commune.
+    Le complément est facultatif : toute erreur laisse le disque tel quel."""
+    band = warped.GetRasterBand(1)
+    main = band.ReadAsArray().astype(np.float64)
+    gt = warped.GetGeoTransform()
+    xs = gt[0] + (np.arange(main.shape[1]) + 0.5) * gt[1]
+    ys = gt[3] + (np.arange(main.shape[0]) + 0.5) * gt[5]
+    inside = (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2 <= radius ** 2
+    valid_main = np.isfinite(main) & (main != nodata)
+    coverage = float(valid_main[inside].mean())
+    if coverage >= FILL_MIN_DISC_COVERAGE:
+        return
+    log(f"Complément : {100 * (1 - coverage):.1f} % du disque sans donnée dans la source principale")
+    try:
+        secondary_path = loader()
+        sec_ds = gdal.Warp(
+            "", secondary_path, format="MEM", dstSRS=dst_srs_wkt, outputBounds=bounds,
+            xRes=pixel_size_m, yRes=pixel_size_m,
+            resampleAlg="bilinear" if pixel_size_m < 25.0 else "average", dstNodata=nodata)
+        sec = sec_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+    except (RuntimeError, OSError) as e:
+        log(f"Complément indisponible ({str(e).splitlines()[0][:200]}) : disque laissé partiel")
+        return
+    if sec.shape != main.shape:
+        log("Complément ignoré : grilles incompatibles")
+        return
+    valid_sec = np.isfinite(sec) & (sec != nodata)
+    need = inside & ~valid_main & valid_sec
+    if not need.any():
+        log("Complément : la source secondaire n'a rien à ajouter ici")
+        return
+    both = inside & valid_main & valid_sec
+    offset = 0.0
+    if both.sum() >= FILL_MIN_OVERLAP_CELLS:
+        diff = main[both] - sec[both]
+        offset = float(np.median(diff))
+        iqr = float(np.percentile(diff, 75) - np.percentile(diff, 25))
+        if abs(offset) > FILL_MAX_OFFSET_M:
+            log(f"Complément abandonné : décalage d'altitude de {offset:+.1f} m entre les deux sources "
+                f"(> {FILL_MAX_OFFSET_M:g} m), référence d'altitude incompatible ?")
+            return
+        log(f"Complément : décalage d'altitude principal - secondaire {offset:+.2f} m "
+            f"(médiane sur {int(both.sum())} cellules communes, écart interquartile {iqr:.1f} m) appliqué")
+    else:
+        log(f"Complément : zone commune trop petite ({int(both.sum())} cellules) pour recaler les altitudes, "
+            f"aucun décalage appliqué")
+    main[need] = sec[need] + offset
+    band.WriteArray(main)
+    log(f"Complément : {int(need.sum())} cellules ({100 * need.sum() / inside.sum():.1f} % du disque) "
+        f"ajoutées depuis la source secondaire, à plus faible résolution : raccord visible à la limite")
+
+
+def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
     reprojection et découpe en une seule passe, donc même une source
-    volumineuse en CRS géographique n'est jamais traitée en entier."""
+    volumineuse en CRS géographique n'est jamais traitée en entier.
+
+    Si input_path porte un attribut `fill_loader` (voir sources.with_copernicus_fill),
+    les trous du disque sont comblés par cette source secondaire, recalée en altitude.
+    fill=False : valeurs brutes, sans comblement ni complément (compare_dems)."""
     ds = gdal.Open(_primary(input_path))
     nodata = ds.GetRasterBand(1).GetNoDataValue()
+    loader = getattr(input_path, "fill_loader", None) if fill else None
+    if loader is not None and nodata is None:
+        nodata = FILL_NODATA
 
     xmin, xmax = cx - radius, cx + radius
     ymin, ymax = cy - radius, cy + radius
@@ -133,8 +200,12 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
         callback=progress_cb or gdal.TermProgress_nocb,
     )
     band = warped.GetRasterBand(1)
-    gdal.FillNodata(band, None, maxSearchDist=50, smoothingIterations=0,
-                     callback=progress_cb or gdal.TermProgress_nocb)
+    if loader is not None:
+        _complete_with_secondary(warped, loader, dst_srs_wkt, (xmin, ymin, xmax, ymax),
+                                 pixel_size_m, nodata, cx, cy, radius)
+    if fill:  # fill=False : valeurs brutes, pour mesurer sans créer de données (compare_dems)
+        gdal.FillNodata(band, None, maxSearchDist=50, smoothingIterations=0,
+                         callback=progress_cb or gdal.TermProgress_nocb)
     elev = band.ReadAsArray().astype(np.float64)
     wgt = warped.GetGeoTransform()
     H, W = elev.shape

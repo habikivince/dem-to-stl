@@ -31,6 +31,7 @@ import numpy as np
 
 import download
 import mesh
+import geocode
 import raster
 import sources
 import stl_io
@@ -139,6 +140,22 @@ def main():
                     help="Latitude du centre (WGS84) — alternative à --cx/--cy")
     p.add_argument("--lon", type=float, default=None,
                     help="Longitude du centre (WGS84) — alternative à --cx/--cy")
+    p.add_argument("--full-res", action="store_true",
+                    help="Avec --source : télécharge la résolution native maximale de la source (swisstopo "
+                         "0,5 m, USGS 1 m, Kartverket 1 m, IGN 0,5 m...) au lieu de celle suffisante pour le "
+                         "maillage demandé. Le STL obtenu est quasi identique (le maillage reste limité par "
+                         "--print-spacing-mm) mais les téléchargements sont beaucoup plus lourds.")
+    p.add_argument("--fill-with-copernicus", action="store_true",
+                    help="Comble les parties du disque sans donnée (frontière, couverture incomplète) avec "
+                         "Copernicus GLO-30, recalé en altitude sur la source principale d'après leur zone "
+                         "commune. Copernicus n'est téléchargé que s'il y a des trous. Requiert --lat/--lon "
+                         "(ou --place) ; fonctionne avec --source ou --input.")
+    p.add_argument("--place", default=None,
+                    help="Nom de lieu à la place de --lat/--lon (ex. \"Mont Fuji\", \"Mount Everest\"), "
+                         "résolu via Nominatim/OpenStreetMap. Sans --input ni --source, la source est "
+                         "choisie automatiquement (--source auto).")
+    p.add_argument("--place-pick", type=int, default=1,
+                    help="Avec --place : numéro du résultat à retenir si le premier n'est pas le bon (1-5)")
     p.add_argument("--radius", type=float, required=True, help="Rayon du cercle, en mètres")
     p.add_argument("--diameter-mm", type=float, default=None,
                     help="Diamètre final imprimé, en mm (demandé interactivement si omis)")
@@ -173,12 +190,22 @@ def main():
                     help="Dossier de cache des données téléchargées (Copernicus et sources nationales)")
     args = p.parse_args()
 
+    if args.place:
+        if any(v is not None for v in (args.lat, args.lon, args.cx, args.cy)):
+            sys.exit("Erreur : --place est incompatible avec --lat/--lon et --cx/--cy.")
+        try:
+            args.lat, args.lon = geocode.resolve(args.place, args.place_pick, args.cache_dir, log=raster.log)
+        except geocode.GeocodeError as e:
+            sys.exit(f"Erreur : {e}")
+        if args.input is None and args.source is None and not args.download_copernicus:
+            args.source = "auto"
+
     have_latlon = args.lat is not None and args.lon is not None
     have_xy = args.cx is not None and args.cy is not None
     if have_latlon and have_xy:
         sys.exit("Erreur : fournis --cx/--cy OU --lat/--lon, pas les deux.")
     if not have_latlon and not have_xy:
-        sys.exit("Erreur : fournis --cx/--cy (CRS du fichier source) ou --lat/--lon (WGS84).")
+        sys.exit("Erreur : fournis --cx/--cy (CRS du fichier source), --lat/--lon (WGS84) ou --place.")
 
     source = args.source or ("copernicus" if args.download_copernicus else None)
     if args.source and args.download_copernicus and args.source != "copernicus":
@@ -192,6 +219,9 @@ def main():
     elif args.input is None:
         sys.exit("Erreur : fournis --input, ou utilise --source (ou --download-copernicus).")
 
+    if args.fill_with_copernicus and not have_latlon:
+        sys.exit("Erreur : --fill-with-copernicus requiert --lat/--lon (ou --place).")
+
     # Paramètres d'impression demandés AVANT le téléchargement : la résolution de
     # travail (pixel_size_m) en découle et sert à choisir la résolution à récupérer.
     if args.diameter_mm is None:
@@ -201,12 +231,25 @@ def main():
     if args.vexag is None:
         args.vexag = ask_float("Exagération verticale", 1.0)
 
+    used = None
     if source:
         pixel_size_m = args.print_spacing_mm / ((args.diameter_mm / 2.0) / args.radius)
+        if args.full_res:
+            raster.log(f"--full-res : résolution native maximale demandée (le maillage reste à "
+                       f"{pixel_size_m:.2f} m/pixel d'après --print-spacing-mm)")
+            pixel_size_m = sources.FULL_RES_PIXEL_M
         used, args.input = sources.acquire(
             source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
             copernicus_product=args.copernicus_product, log=raster.log)
         raster.log(f"source utilisée : {used}")
+
+    if args.fill_with_copernicus:
+        if used == "copernicus":
+            raster.log("--fill-with-copernicus ignoré : la source principale est déjà Copernicus")
+        else:
+            args.input = sources.with_copernicus_fill(
+                args.input, args.lat, args.lon, args.radius, args.cache_dir,
+                product_m=args.copernicus_product, log=raster.log)
 
     tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
                        args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
