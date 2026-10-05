@@ -314,6 +314,35 @@ dimension horizontale, l'épaisseur du socle, le dénivelé impliqué par l'éch
 `--tol-mm` règle la tolérance sur les dimensions, `--no-watertight` saute le test des
 arêtes sur de très gros fichiers.
 
+### Contours de lieux (`--place ... --clip-to-place`)
+
+`--clip-to-place` découpe selon le contour OpenStreetMap du lieu (île, commune, pays)
+au lieu d'un cercle ; le contour est demandé à Nominatim (`polygon_geojson`, simplifié
+côté serveur à environ 30 m) puis se comporte exactement comme `--polygon`. Un résultat
+purement ponctuel (un sommet, par exemple) n'a pas de contour : l'outil l'indique, et
+`--place-pick` permet de choisir un autre candidat.
+
+```
+python circle_dem_to_stl.py --place "La Réunion" --clip-to-place --diameter-mm 200 --output reunion.stl
+```
+
+## Sources de données, licences et mentions
+
+L'outil ne fait que télécharger les données ; les conditions ci-dessous comptent quand
+tu **partages ou vends** un modèle construit à partir d'elles. Formulations relevées sur
+les pages de chaque fournisseur en octobre 2026 ; ce n'est pas un avis juridique,
+vérifie les conditions en vigueur avant de publier.
+
+| Source | Conditions | Mention |
+|---|---|---|
+| swisstopo (swissALTI3D) | Open Government Data : usage libre, y compris commercial | Obligatoire : « © swisstopo » ou « Office fédéral de topographie swisstopo » |
+| IGN (LiDAR HD, RGE ALTI) | Licence Ouverte Etalab 2.0 (données ouvertes) | Source « IGN » ; RGE ALTI est moins précis sur les fortes pentes (environ 7 m en vertical, d'après le catalogue Earth Engine) |
+| Kartverket (Høydedata DTM1) | CC BY 4.0 | Créditer Kartverket |
+| USGS 3DEP | Domaine public | Mention demandée (« U.S. Geological Survey, 3D Elevation Program ») |
+| GSI Japon (tuiles d'élévation) | Conditions d'utilisation des contenus de la GSI (PDL 1.0) | Indiquer la source (出典:国土地理院ウェブサイト) **et** la transformation des données, par ex. « 地理院タイル (標高タイル(基盤地図情報数値標高モデル))を加工して作成 » ; ne jamais présenter le résultat comme produit par la GSI |
+| Copernicus DEM GLO-30 | Licence gratuite | « produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved » en cas de modification ; la licence demande aussi une mention d'exclusion de responsabilité à la diffusion |
+| OpenStreetMap / Nominatim (`--place`) | ODbL ; serveur public limité à 1 requête/seconde avec un User-Agent identifiant | « © OpenStreetMap contributors » |
+
 ## Tests
 
 ```bash

@@ -302,6 +302,34 @@ horizontal dimension, the base thickness, the elevation range implied by the sca
 (open, non-manifold or badly oriented edges). Exit code 1 on failure; `--tol-mm`
 adjusts the dimension tolerance, `--no-watertight` skips the edge test on huge files.
 
+### Place outlines (`--place ... --clip-to-place`)
+
+`--clip-to-place` cuts along the OpenStreetMap outline of the place (island, commune,
+country) instead of a circle; the outline is requested from Nominatim
+(`polygon_geojson`, simplified server-side to about 30 m) and then behaves exactly like
+`--polygon`. A result that is only a point (a summit, say) has no outline: the tool
+says so, and `--place-pick` lets you choose another candidate.
+
+```
+python circle_dem_to_stl.py --place "La Réunion" --clip-to-place --diameter-mm 200 --output reunion.stl
+```
+
+## Data sources, licences and attribution
+
+The tool only downloads data; the conditions below matter when you **share or sell** a
+model built from them. Wording checked against each provider's own pages in October
+2026; this is not legal advice, so check the current terms before publishing.
+
+| Source | Terms | Attribution |
+|---|---|---|
+| swisstopo (swissALTI3D) | Open Government Data: free use, including commercial | Mandatory: "© swisstopo" or "Federal Office of Topography swisstopo" |
+| IGN (LiDAR HD, RGE ALTI) | Licence Ouverte Etalab 2.0 (open data) | Source "IGN"; RGE ALTI is less accurate on steep terrain (about 7 m vertical, per the Earth Engine catalogue) |
+| Kartverket (Høydedata DTM1) | CC BY 4.0 | Credit Kartverket |
+| USGS 3DEP | Public domain | Credit requested ("U.S. Geological Survey, 3D Elevation Program") |
+| GSI Japan (elevation tiles) | GSI content terms (PDL 1.0) | State the source (出典:国土地理院ウェブサイト) **and** that the data was processed, e.g. "地理院タイル (標高タイル(基盤地図情報数値標高モデル))を加工して作成"; never present it as made by GSI |
+| Copernicus DEM GLO-30 | Free licence | "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved" when adapted; the licence also asks for a no-liability notice when distributing |
+| OpenStreetMap / Nominatim (`--place`) | ODbL; public server limited to 1 request/second with an identifying User-Agent | "© OpenStreetMap contributors" |
+
 ## Tests
  
 ```bash

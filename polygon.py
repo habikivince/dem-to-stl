@@ -10,6 +10,8 @@ d'inclusion est obtenu par remplissage de lignes (règle pair-impair) sur les ce
 cellules : trous et polygones disjoints (archipel) sont gérés, sans dépendance au-delà
 de GDAL/OGR et numpy. Les polygones qui traversent l'antiméridien ne sont pas gérés.
 """
+import json
+
 import numpy as np
 from osgeo import ogr, osr
 
@@ -70,6 +72,18 @@ class PolygonClip:
         geom = self.geom_wgs84.Clone()
         geom.Transform(osr.CoordinateTransformation(_srs(epsg=4326), _srs(wkt=dst_wkt)))
         return geom
+
+
+def from_geojson(geometry):
+    """PolygonClip depuis une géométrie GeoJSON (dict) en lon/lat WGS84 (ex. Nominatim)."""
+    try:
+        geom = ogr.CreateGeometryFromJson(json.dumps(geometry))
+    except (RuntimeError, TypeError, ValueError) as e:
+        raise PolygonError(f"géométrie GeoJSON invalide ({e})")
+    geom = _as_multipolygon(geom) if geom is not None else None
+    if geom is None:
+        raise PolygonError("la géométrie n'est pas un polygone")
+    return PolygonClip(geom, 1)
 
 
 def load_polygon(path, where=None, log=print):

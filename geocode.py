@@ -23,6 +23,7 @@ import os
 import time
 import urllib.parse
 
+import polygon
 import sources
 
 NOMINATIM_URL = os.environ.get("DEM2STL_GEOCODER_URL", "https://nominatim.openstreetmap.org/search")
@@ -38,25 +39,31 @@ class GeocodeError(RuntimeError):
     """Lieu introuvable ou service de géocodage indisponible."""
 
 
-def _cache_path(cache_dir, query):
-    key = hashlib.sha1(" ".join(query.split()).casefold().encode("utf-8")).hexdigest()[:16]
+POLYGON_THRESHOLD_DEG = 0.0003   # simplification demandée au serveur (~30 m), topologie préservée
+
+
+def _cache_path(cache_dir, query, with_polygon=False):
+    norm = " ".join(query.split()).casefold() + ("|polygon" if with_polygon else "")
+    key = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
     return os.path.join(cache_dir, "geocode", f"{key}.json")
 
 
-def search(query, cache_dir, log=print):
+def search(query, cache_dir, log=print, with_polygon=False):
     """Liste de candidats [{name, lat, lon, category, type}] (ordre Nominatim)."""
     query = query.strip()
     if not query:
         raise GeocodeError("nom de lieu vide")
-    path = _cache_path(cache_dir, query)
+    path = _cache_path(cache_dir, query, with_polygon)
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     wait = MIN_INTERVAL_S - (time.monotonic() - _last_request[0])
     if wait > 0:
         time.sleep(wait)
-    url = NOMINATIM_URL + "?" + urllib.parse.urlencode({
-        "q": query, "format": "jsonv2", "limit": MAX_RESULTS, "dedupe": 1, "accept-language": "fr,en"})
+    params = {"q": query, "format": "jsonv2", "limit": MAX_RESULTS, "dedupe": 1, "accept-language": "fr,en"}
+    if with_polygon:
+        params.update({"polygon_geojson": 1, "polygon_threshold": POLYGON_THRESHOLD_DEG})
+    url = NOMINATIM_URL + "?" + urllib.parse.urlencode(params)
     try:
         data = sources._http_get(url)
     except sources.SourceUnavailable as e:
@@ -68,7 +75,8 @@ def search(query, cache_dir, log=print):
     try:
         raw = json.loads(data.decode("utf-8"))
         results = [{"name": r["display_name"], "lat": float(r["lat"]), "lon": float(r["lon"]),
-                    "category": r.get("category", ""), "type": r.get("type", "")} for r in raw]
+                    "category": r.get("category", ""), "type": r.get("type", ""),
+                    **({"geojson": r.get("geojson")} if with_polygon else {})} for r in raw]
     except (ValueError, KeyError, TypeError) as e:
         raise GeocodeError(f"géocodage : réponse invalide ({e})")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -77,9 +85,8 @@ def search(query, cache_dir, log=print):
     return results
 
 
-def resolve(query, pick, cache_dir, log=print):
-    """(lat, lon) du pick-ième résultat (1 = premier) ; journalise les candidats."""
-    results = search(query, cache_dir, log)
+def _choose(query, pick, results, log):
+    """Résultat retenu (1 = premier) ; journalise les candidats et la mention OSM."""
     if not results:
         raise GeocodeError(f"aucun résultat pour « {query} » (essaie un nom plus précis ou --lat/--lon)")
     if not 1 <= pick <= len(results):
@@ -97,4 +104,26 @@ def resolve(query, pick, cache_dir, log=print):
                     f"lat={r['lat']:.5f} lon={r['lon']:.5f}")
         log("  (choisis un autre candidat avec --place-pick N)")
     log("Géocodage : données © OpenStreetMap contributors (ODbL), via Nominatim.")
+    return chosen
+
+
+def resolve(query, pick, cache_dir, log=print):
+    """(lat, lon) du pick-ième résultat (1 = premier)."""
+    chosen = _choose(query, pick, search(query, cache_dir, log), log)
     return chosen["lat"], chosen["lon"]
+
+
+def resolve_polygon(query, pick, cache_dir, log=print):
+    """PolygonClip du contour OpenStreetMap du pick-ième résultat (île, commune, pays...).
+    Un résultat ponctuel (sommet, ville en simple point) n'a pas de contour : erreur."""
+    chosen = _choose(query, pick, search(query, cache_dir, log, with_polygon=True), log)
+    geometry = chosen.get("geojson")
+    gtype = (geometry or {}).get("type")
+    if gtype not in ("Polygon", "MultiPolygon"):
+        raise GeocodeError(f"« {chosen['name']} » n'a pas de contour surfacique dans OpenStreetMap "
+                           f"(type {gtype or 'absent'}) ; essaie --place-pick pour un autre candidat, "
+                           f"un nom d'île/commune/pays, ou --polygon avec ton propre contour")
+    try:
+        return polygon.from_geojson(geometry)
+    except polygon.PolygonError as e:
+        raise GeocodeError(f"contour OpenStreetMap inutilisable ({e})")

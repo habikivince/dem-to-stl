@@ -169,6 +169,10 @@ def main():
                     help="Nom de lieu à la place de --lat/--lon (ex. \"Mont Fuji\", \"Mount Everest\"), "
                          "résolu via Nominatim/OpenStreetMap. Sans --input ni --source, la source est "
                          "choisie automatiquement (--source auto).")
+    p.add_argument("--clip-to-place", action="store_true",
+                    help="Avec --place : découpe selon le contour OpenStreetMap du lieu (île, commune, pays) "
+                         "au lieu d'un cercle ; --diameter-mm devient la plus grande dimension imprimée. "
+                         "Incompatible avec --radius, --polygon, --smooth-wall.")
     p.add_argument("--place-pick", type=int, default=1,
                     help="Avec --place : numéro du résultat à retenir si le premier n'est pas le bon (1-5)")
     p.add_argument("--polygon", default=None,
@@ -229,14 +233,26 @@ def main():
         raster.log(f"Contour : centre lat={args.lat:.5f} lon={args.lon:.5f}")
         if args.input is None and args.source is None and not args.download_copernicus:
             args.source = "auto"
+    elif args.clip_to_place:
+        bad = [n for n, v in (("--radius", args.radius), ("--smooth-wall", args.smooth_wall or None)) if v is not None]
+        if not args.place:
+            sys.exit("Erreur : --clip-to-place requiert --place.")
+        if bad:
+            sys.exit("Erreur : --clip-to-place est incompatible avec " + ", ".join(bad)
+                     + " (la taille vient du contour).")
     elif args.radius is None:
-        sys.exit("Erreur : --radius est requis (ou --polygon).")
+        sys.exit("Erreur : --radius est requis (ou --polygon, ou --place avec --clip-to-place).")
 
     if args.place:
         if any(v is not None for v in (args.lat, args.lon, args.cx, args.cy)):
             sys.exit("Erreur : --place est incompatible avec --lat/--lon et --cx/--cy.")
         try:
-            args.lat, args.lon = geocode.resolve(args.place, args.place_pick, args.cache_dir, log=raster.log)
+            if args.clip_to_place:
+                clip = geocode.resolve_polygon(args.place, args.place_pick, args.cache_dir, log=raster.log)
+                args.lat, args.lon = clip.center_latlon()
+                args.radius = clip.approx_radius_m() * 1.02   # sert seulement à choisir/télécharger les données
+            else:
+                args.lat, args.lon = geocode.resolve(args.place, args.place_pick, args.cache_dir, log=raster.log)
         except geocode.GeocodeError as e:
             sys.exit(f"Erreur : {e}")
         if args.input is None and args.source is None and not args.download_copernicus:

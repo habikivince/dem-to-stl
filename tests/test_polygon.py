@@ -225,3 +225,71 @@ def test_check_stl_rejects_non_binary(tmp_path):
     (tmp_path / "a.stl").write_text("solid x\nendsolid x\n" * 10)
     with pytest.raises(ValueError):
         check_stl.read_stl(str(tmp_path / "a.stl"))
+
+
+# ---------------------------------------------------------------- --clip-to-place (Nominatim)
+
+import geocode  # noqa: E402
+
+
+def nominatim_payload(geometry, name="Île test, France", typ="island"):
+    return json.dumps([{"display_name": name, "lat": "46.0", "lon": "7.6", "category": "place", "type": typ,
+                        **({"geojson": geometry} if geometry is not None else {})}]).encode("utf-8")
+
+
+def square_geojson(x, y, half_m):
+    """Carré en lon/lat autour de (x, y) EPSG:2056, de demi-côté half_m."""
+    ct = osr.CoordinateTransformation(sources._srs(2056), sources._srs(4326))
+    pts = [ct.TransformPoint(x + dx, y + dy)[:2] for dx, dy in
+           ((-half_m, -half_m), (half_m, -half_m), (half_m, half_m), (-half_m, half_m), (-half_m, -half_m))]
+    return {"type": "Polygon", "coordinates": [[list(p) for p in pts]]}
+
+
+def test_resolve_polygon_asks_for_geojson_and_caches_separately(tmp_path, monkeypatch):
+    urls = []
+    monkeypatch.setattr(geocode.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: urls.append(url) or nominatim_payload(
+        {"type": "Polygon", "coordinates": [[[7.5, 45.9], [7.7, 45.9], [7.7, 46.1], [7.5, 46.1], [7.5, 45.9]]]}))
+    clip = geocode.resolve_polygon("Île test", 1, str(tmp_path), log=quiet)
+    assert "polygon_geojson=1" in urls[0] and "polygon_threshold=" in urls[0]
+    lat, lon = clip.center_latlon()
+    assert (lat, lon) == pytest.approx((46.0, 7.6), abs=1e-6)
+    # la recherche simple du même nom ne réutilise pas le cache avec contour (et inversement)
+    geocode.resolve("Île test", 1, str(tmp_path), log=quiet)
+    assert len(urls) == 2 and "polygon_geojson" not in urls[1]
+    geocode.resolve_polygon("Île test", 1, str(tmp_path), log=quiet)
+    assert len(urls) == 2
+
+
+def test_resolve_polygon_point_result_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(geocode.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: nominatim_payload(
+        {"type": "Point", "coordinates": [7.6, 46.0]}, name="Mont Test", typ="peak"))
+    with pytest.raises(geocode.GeocodeError, match="pas de contour"):
+        geocode.resolve_polygon("Mont Test", 1, str(tmp_path), log=quiet)
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: nominatim_payload(None))
+    with pytest.raises(geocode.GeocodeError, match="absent"):
+        geocode.resolve_polygon("Mont Test2", 1, str(tmp_path), log=quiet)
+
+
+def test_cli_clip_to_place_end_to_end_and_conflicts(tmp_path, monkeypatch):
+    dem, _ = make_dem_and_polygon(tmp_path)
+    x, y = sources._to_epsg(2056, 46.0, 7.6)
+    monkeypatch.setattr(geocode.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: nominatim_payload(square_geojson(x, y, 700.0)))
+    out = tmp_path / "ile.stl"
+    run_cli(monkeypatch, ["--input", dem, "--place", "Île test", "--clip-to-place", "--diameter-mm", "70",
+                          "--vexag", "1", "--base-mm", "2", "--print-spacing-mm", "1", "--output", str(out),
+                          "--cache-dir", str(tmp_path / "c")])
+    res = {n: ok for n, ok, _ in check_stl.check(check_stl.read_stl(str(out)), 70.0, 2.0, tol_mm=2.0)}
+    assert all(res.values()), res
+    for extra, msg in ((["--radius", "500"], "incompatible"), (["--smooth-wall"], "incompatible")):
+        monkeypatch.setattr(sys, "argv", ["x", "--input", dem, "--place", "Île test", "--clip-to-place",
+                                          "--output", str(tmp_path / "o.stl")] + extra)
+        with pytest.raises(SystemExit) as e:
+            circle_dem_to_stl.main()
+        assert msg in str(e.value)
+    monkeypatch.setattr(sys, "argv", ["x", "--input", dem, "--clip-to-place", "--output", str(tmp_path / "o.stl")])
+    with pytest.raises(SystemExit) as e:
+        circle_dem_to_stl.main()
+    assert "requiert --place" in str(e.value)
