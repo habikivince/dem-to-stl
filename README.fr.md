@@ -278,6 +278,42 @@ bâtiments) à 30 m alors que les données nationales sont en général du sol n
 le raccord montre un changement de résolution et de nature ; le log indique la part
 du disque comblée.
 
+### Découpe par polygone (`--polygon`)
+
+À la place d'un disque, ne modéliser que l'intérieur d'un contour (île, frontière,
+commune...). Le contour peut être tout fichier vectoriel lisible par OGR (GeoJSON,
+GPKG, shapefile), dans n'importe quel CRS :
+
+```
+python circle_dem_to_stl.py --polygon corse.geojson --polygon-where "NAME='Corse'" \
+    --diameter-mm 200 --vexag 2 --base-mm 3 --output corse.stl
+```
+
+* Le centre et la taille viennent du contour : `--radius`, `--lat/--lon`, `--cx/--cy`,
+  `--place` et `--smooth-wall` sont refusés avec `--polygon`. Sans `--input` ni
+  `--source`, la source de DEM est choisie automatiquement (`--source auto`).
+* `--diameter-mm` est la **plus grande dimension imprimée** du contour.
+* Tous les polygones du fichier (ou ceux choisis par `--polygon-where`, un filtre
+  d'attributs OGR) sont fusionnés ; trous et parties disjointes (archipel) sont gardés.
+* La paroi suit le contour en escalier à la résolution de travail. Une pointe plus fine
+  qu'un pas de grille est absente du maillage : la dimension imprimée peut être de
+  quelques pas plus courte que demandée pour des formes très pointues.
+* `--fill-with-copernicus` et `--sea-level` fonctionnent avec un contour ; les polygones
+  qui traversent l'antiméridien ne sont pas gérés.
+
+### Contrôler un STL (`check_stl.py`)
+
+```
+python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --relief-m 2247
+```
+
+Relit le STL binaire (indépendamment du code de maillage) et vérifie la plus grande
+dimension horizontale, l'épaisseur du socle, le dénivelé impliqué par l'échelle (avec
+`--radius`, éventuellement comparé à `--relief-m`, tolérance 1 %) et l'étanchéité
+(arêtes ouvertes, non-manifold ou mal orientées). Code de sortie 1 en cas d'échec ;
+`--tol-mm` règle la tolérance sur les dimensions, `--no-watertight` saute le test des
+arêtes sur de très gros fichiers.
+
 ## Tests
 
 ```bash

@@ -117,7 +117,8 @@ FILL_MAX_OFFSET_M = 50.0
 FILL_MIN_OVERLAP_CELLS = 100
 
 
-def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, nodata, cx, cy, radius):
+def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, nodata, cx, cy, radius,
+                             inside_fn=None):
     """Comble les cellules du disque sans donnée avec une source secondaire grossière
     (Copernicus), recalée en altitude sur la source principale d'après leur zone commune.
     Le complément est facultatif : toute erreur laisse le disque tel quel."""
@@ -126,7 +127,8 @@ def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, 
     gt = warped.GetGeoTransform()
     xs = gt[0] + (np.arange(main.shape[1]) + 0.5) * gt[1]
     ys = gt[3] + (np.arange(main.shape[0]) + 0.5) * gt[5]
-    inside = (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2 <= radius ** 2
+    inside = (inside_fn(xs, ys) if inside_fn is not None
+              else (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2 <= radius ** 2)
     valid_main = np.isfinite(main) & (main != nodata)
     coverage = float(valid_main[inside].mean())
     if coverage >= FILL_MIN_DISC_COVERAGE:
@@ -171,7 +173,8 @@ def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, 
         f"ajoutées depuis la source secondaire, à plus faible résolution : raccord visible à la limite")
 
 
-def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True):
+def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
+                inside_fn=None):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
@@ -180,7 +183,8 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
 
     Si input_path porte un attribut `fill_loader` (voir sources.with_copernicus_fill),
     les trous du disque sont comblés par cette source secondaire, recalée en altitude.
-    fill=False : valeurs brutes, sans comblement ni complément (compare_dems)."""
+    fill=False : valeurs brutes, sans comblement ni complément (compare_dems).
+    inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone)."""
     ds = gdal.Open(_primary(input_path))
     nodata = ds.GetRasterBand(1).GetNoDataValue()
     loader = getattr(input_path, "fill_loader", None) if fill else None
@@ -202,7 +206,7 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     band = warped.GetRasterBand(1)
     if loader is not None:
         _complete_with_secondary(warped, loader, dst_srs_wkt, (xmin, ymin, xmax, ymax),
-                                 pixel_size_m, nodata, cx, cy, radius)
+                                 pixel_size_m, nodata, cx, cy, radius, inside_fn)
     if fill:  # fill=False : valeurs brutes, pour mesurer sans créer de données (compare_dems)
         gdal.FillNodata(band, None, maxSearchDist=50, smoothingIterations=0,
                          callback=progress_cb or gdal.TermProgress_nocb)

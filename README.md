@@ -268,6 +268,40 @@ fill is abandoned if that shift exceeds 50 m. Limits: Copernicus is a surface mo
 junction shows a resolution and character change; the log reports the share of the
 disc filled.
 
+### Cutting by polygon (`--polygon`)
+
+Instead of a disc, model only the inside of a contour (island, border, commune...).
+The contour can be any vector file OGR reads (GeoJSON, GPKG, shapefile), in any CRS:
+
+```
+python circle_dem_to_stl.py --polygon corse.geojson --polygon-where "NAME='Corse'" \
+    --diameter-mm 200 --vexag 2 --base-mm 3 --output corse.stl
+```
+
+* The centre and size come from the contour: `--radius`, `--lat/--lon`, `--cx/--cy`,
+  `--place` and `--smooth-wall` are not allowed with `--polygon`. Without `--input` or
+  `--source`, the DEM source is chosen automatically (`--source auto`).
+* `--diameter-mm` is the **largest printed dimension** of the contour.
+* All polygons of the file (or those selected by `--polygon-where`, an OGR attribute
+  filter) are merged; holes and disjoint parts (archipelago) are kept.
+* The wall follows the contour as a staircase at the working resolution. A tip thinner
+  than one grid step is absent from the mesh, so the printed dimension can be a few
+  steps shorter than requested for very pointed shapes.
+* `--fill-with-copernicus` and `--sea-level` work with a contour; polygons crossing the
+  antimeridian are not handled.
+
+### Checking an STL (`check_stl.py`)
+
+```
+python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --relief-m 2247
+```
+
+Re-reads the binary STL (independently of the meshing code) and checks the largest
+horizontal dimension, the base thickness, the elevation range implied by the scale
+(with `--radius`, optionally against `--relief-m`, tolerance 1 %) and watertightness
+(open, non-manifold or badly oriented edges). Exit code 1 on failure; `--tol-mm`
+adjusts the dimension tolerance, `--no-watertight` skips the edge test on huge files.
+
 ## Tests
  
 ```bash

@@ -32,6 +32,7 @@ import numpy as np
 import download
 import mesh
 import geocode
+import polygon
 import raster
 import sources
 import stl_io
@@ -64,18 +65,32 @@ def ask_float(question, default):
 
 def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
-                smooth_wall=False):
+                smooth_wall=False, clip=None):
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
+
+    clip_rings = None
+    if clip is not None:
+        # mode polygone : fenêtre carrée englobant le contour, « rayon » = demi-plus grande dimension
+        clip_geom = clip.to_srs(dst_srs_wkt)
+        x_min, x_max, y_min, y_max = clip_geom.GetEnvelope()
+        cx, cy = (x_min + x_max) / 2.0, (y_min + y_max) / 2.0
+        radius = max(x_max - x_min, y_max - y_min) / 2.0
+        clip_rings = polygon.rings_of(clip_geom)
+        log(f"contour : emprise {x_max - x_min:.0f} x {y_max - y_min:.0f} m ; plus grande dimension "
+            f"imprimée = {diameter_mm:g} mm")
+    inside_fn = (lambda xs_, ys_: polygon.polygon_mask(clip_rings, xs_, ys_)) if clip is not None else None
 
     scale = (diameter_mm / 2.0) / radius
     pixel_size_m = print_spacing_mm / scale
     log(f"échelle : {scale:.6f} mm/m | résolution de ré-échantillonnage : {pixel_size_m:.3f} m/pixel")
 
-    elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m)
+    elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m,
+                                              inside_fn=inside_fn)
     H, W = elev.shape
     log(f"grille ré-échantillonnée : {W} x {H} points")
 
-    dist2 = (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2
+    inside = (inside_fn(xs, ys) if inside_fn is not None
+              else (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2 <= radius ** 2)
     valid = (elev != nodata) if nodata is not None else np.ones_like(elev, dtype=bool)
     plausible = valid & (elev > min_elevation)
 
@@ -105,18 +120,18 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         n_replaced = int((~is_land).sum())
         elev = np.where(is_land, elev, sea_level)
         log(f"{n_replaced} pixels remplacés par le niveau de la mer ({sea_level} m)")
-        raw_mask = dist2 <= radius ** 2
+        raw_mask = inside
     else:
-        raw_mask = (dist2 <= radius ** 2) & plausible
+        raw_mask = inside & plausible
 
     if not raw_mask.any():
-        sys.exit("Erreur : aucun pixel valide à l'intérieur du cercle demandé.")
+        sys.exit("Erreur : aucun pixel valide à l'intérieur de la zone demandée (cercle ou contour).")
 
     clean_mask, quad_ok = mesh.clean_mask(raw_mask)
     if not quad_ok.any():
-        sys.exit("Erreur : cercle trop petit par rapport à la résolution de ré-échantillonnage "
+        sys.exit("Erreur : zone trop petite par rapport à la résolution de ré-échantillonnage "
                   "(ou vide après nettoyage morphologique).")
-    log(f"{int(quad_ok.sum())} cellules incluses dans le disque")
+    log(f"{int(quad_ok.sum())} cellules incluses dans {'le contour' if clip is not None else 'le disque'}")
 
     min_elev = sea_level if sea_level is not None else elev[clean_mask].min()
 
@@ -156,7 +171,14 @@ def main():
                          "choisie automatiquement (--source auto).")
     p.add_argument("--place-pick", type=int, default=1,
                     help="Avec --place : numéro du résultat à retenir si le premier n'est pas le bon (1-5)")
-    p.add_argument("--radius", type=float, required=True, help="Rayon du cercle, en mètres")
+    p.add_argument("--polygon", default=None,
+                    help="Contour (GeoJSON, GPKG, shapefile...) à la place du cercle : seule la zone "
+                         "intérieure est modélisée. --diameter-mm devient la plus grande dimension imprimée. "
+                         "Incompatible avec --radius, --lat/--lon, --cx/--cy, --place, --smooth-wall.")
+    p.add_argument("--polygon-where", default=None,
+                    help="Filtre d'attributs OGR pour choisir des entités du contour, ex. \"NAME='Corse'\"")
+    p.add_argument("--radius", type=float, default=None,
+                    help="Rayon du cercle, en mètres (requis sans --polygon)")
     p.add_argument("--diameter-mm", type=float, default=None,
                     help="Diamètre final imprimé, en mm (demandé interactivement si omis)")
     p.add_argument("--vexag", type=float, default=None,
@@ -189,6 +211,26 @@ def main():
     p.add_argument("--cache-dir", default="./copernicus_cache",
                     help="Dossier de cache des données téléchargées (Copernicus et sources nationales)")
     args = p.parse_args()
+
+    clip = None
+    if args.polygon:
+        used = [n for n, v in (("--radius", args.radius), ("--lat/--lon", args.lat if args.lat is not None else args.lon),
+                               ("--cx/--cy", args.cx if args.cx is not None else args.cy),
+                               ("--place", args.place), ("--smooth-wall", args.smooth_wall or None)) if v is not None]
+        if used:
+            sys.exit("Erreur : --polygon est incompatible avec " + ", ".join(used)
+                     + " (le centre et la taille viennent du contour).")
+        try:
+            clip = polygon.load_polygon(args.polygon, args.polygon_where, log=raster.log)
+        except polygon.PolygonError as e:
+            sys.exit(f"Erreur : {e}")
+        args.lat, args.lon = clip.center_latlon()
+        args.radius = clip.approx_radius_m() * 1.02   # sert seulement à choisir/télécharger les données
+        raster.log(f"Contour : centre lat={args.lat:.5f} lon={args.lon:.5f}")
+        if args.input is None and args.source is None and not args.download_copernicus:
+            args.source = "auto"
+    elif args.radius is None:
+        sys.exit("Erreur : --radius est requis (ou --polygon).")
 
     if args.place:
         if any(v is not None for v in (args.lat, args.lon, args.cx, args.cy)):
@@ -254,7 +296,7 @@ def main():
     tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
                        args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
                        sea_level=args.sea_level, min_elevation=args.min_elevation,
-                       land_threshold=args.land_threshold, smooth_wall=args.smooth_wall)
+                       land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip)
     stl_io.write_stl_binary(tris, args.output, progress=progress)
     log(f"Terminé : {args.output}")
 
