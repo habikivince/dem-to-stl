@@ -27,11 +27,14 @@ Usage :
 import argparse
 import math
 import os
+import re
 import sys
+import unicodedata
 
 import numpy as np
 
 import mesh
+import mesh_export
 import geocode
 import polygon
 import raster
@@ -44,6 +47,9 @@ log = raster.log
 RAM_BYTES_PER_TRIANGLE = 220    # mesuré : 1,05 Go de pic pour 4,9 M de triangles
 RAM_BASE_BYTES = 300_000_000
 RAM_SAFETY = 0.8
+# Taille des fichiers par rapport au STL, mesurée sur 4,9 M de triangles (STL 245 Mo, 3MF 61 Mo, OBJ 192 Mo) ;
+# varie avec le relief (nombre de chiffres des coordonnées)
+FORMAT_SIZE_RATIO = {"stl": 1.0, "3mf": 0.25, "obj": 0.78}
 MIN_GRID_CELLS = 8
 
 
@@ -77,11 +83,13 @@ def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False):
             "ram_bytes": RAM_BASE_BYTES + RAM_BYTES_PER_TRIANGLE * triangles}
 
 
-def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes):
+def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes,
+                    formats=("stl",)):
     est = estimate_resources(diameter_mm, spacing_mm, polygon_mode)
     avail = ram_available()
+    sizes = ", ".join(f"{f.upper()} ~{est['stl_bytes'] * FORMAT_SIZE_RATIO[f] / 1e6:.0f} Mo" for f in formats)
     log(f"Estimation : grille ~{est['grid']:.0f}², ~{est['triangles'] / 1e6:.1f} M triangles, "
-        f"STL ~{est['stl_bytes'] / 1e6:.0f} Mo, RAM ~{est['ram_bytes'] / 1e9:.1f} Go"
+        f"{sizes}, RAM ~{est['ram_bytes'] / 1e9:.1f} Go"
         + (f" (disponible : {avail / 1e9:.1f} Go)" if avail else ""))
     if avail and est["ram_bytes"] > RAM_SAFETY * avail and not force:
         fail(f"cette taille de grille demanderait environ {est['ram_bytes'] / 1e9:.1f} Go de RAM pour "
@@ -90,18 +98,109 @@ def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram
     return est
 
 
-def prepare_output(path):
-    """Crée le dossier parent et vérifie qu'on peut écrire, AVANT le calcul."""
-    if os.path.isdir(path):
-        fail(f"--output est un dossier ({path}) : donne un nom de fichier.")
-    parent = os.path.dirname(os.path.abspath(path))
-    probe = path + ".part"
-    try:
-        os.makedirs(parent, exist_ok=True)
-        open(probe, "wb").close()
-        os.remove(probe)
-    except OSError as e:
-        fail(f"impossible d'écrire dans {parent} ({e.strerror or e})")
+DEFAULT_OUTPUT_DIR = "output"
+OUTPUT_FORMATS = mesh_export.FORMATS          # ("stl", "3mf", "obj")
+
+# Mentions de source (voir « Sources de données, licences et mentions » du README)
+SOURCE_ATTRIBUTION = {
+    "swisstopo": "© swisstopo",
+    "ign": "Source : IGN (Licence Ouverte Etalab 2.0)",
+    "kartverket": "© Kartverket (CC BY 4.0)",
+    "usgs": "U.S. Geological Survey, 3D Elevation Program",
+    "gsi": "出典:国土地理院ウェブサイト 地理院タイル(標高タイル)を加工して作成",
+    "copernicus": ("produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and "
+                   "Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved"),
+    "osm": "© OpenStreetMap contributors (ODbL)",
+}
+
+
+def slugify(text):
+    text = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "relief"
+
+
+def default_stem(args):
+    if args.place:
+        base = slugify(args.place) + ("-contour" if args.clip_to_place else "")
+    elif args.polygon:
+        base = slugify(os.path.splitext(os.path.basename(args.polygon))[0])
+    elif args.lat is not None and args.lon is not None:
+        base = f"lat{args.lat:.3f}_lon{args.lon:.3f}".replace("-", "m")
+    else:
+        base = f"x{args.cx:.0f}_y{args.cy:.0f}".replace("-", "m")
+    name = f"{base}_{args.diameter_mm:g}mm"
+    return name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
+
+
+def parse_formats(args):
+    if args.format:
+        items = [t.strip().lower() for t in args.format.split(",") if t.strip()]
+        out = []
+        for t in items:
+            for f in (OUTPUT_FORMATS if t == "all" else (t,)):
+                if f not in OUTPUT_FORMATS:
+                    fail(f"format inconnu : {t} (attendu : {', '.join(OUTPUT_FORMATS)} ou all)")
+                if f not in out:
+                    out.append(f)
+        return out
+    if args.output:
+        ext = os.path.splitext(args.output)[1].lower().lstrip(".")
+        if ext in OUTPUT_FORMATS:
+            return [ext]
+    return ["stl"]
+
+
+def resolve_outputs(args):
+    """{format: chemin}. --output sans dossier va dans --output-dir (défaut « output ») ; avec un
+    dossier, il est respecté tel quel. Sans --output, le nom est déduit du lieu/contour et du
+    diamètre, et ne remplace jamais un fichier existant (suffixe _2, _3...)."""
+    formats = parse_formats(args)
+    if args.output:
+        known_ext = os.path.splitext(args.output)[1].lower().lstrip(".") in OUTPUT_FORMATS
+        target = args.output if os.path.dirname(args.output) else os.path.join(args.output_dir, args.output)
+        if not known_ext and not args.format:
+            return {"stl": target}            # comportement historique : nom donné repris tel quel (STL)
+        stem = os.path.splitext(target)[0] if known_ext else target
+        return {f: f"{stem}.{f}" for f in formats}
+    base = os.path.join(args.output_dir, default_stem(args))
+    n, stem = 1, base
+    while any(os.path.exists(f"{stem}.{f}") for f in formats):
+        n += 1
+        stem = f"{base}_{n}"
+    return {f: f"{stem}.{f}" for f in formats}
+
+
+def prepare_outputs(paths):
+    """Crée les dossiers parents et vérifie qu'on peut écrire, AVANT le calcul."""
+    for path in paths.values():
+        if os.path.isdir(path):
+            fail(f"la sortie est un dossier ({path}) : donne un nom de fichier.")
+        parent = os.path.dirname(os.path.abspath(path))
+        probe = path + ".part"
+        try:
+            os.makedirs(parent, exist_ok=True)
+            open(probe, "wb").close()
+            os.remove(probe)
+        except OSError as e:
+            fail(f"impossible d'écrire dans {parent} ({e.strerror or e})")
+
+
+def write_outputs(tris, paths, title, description, attribution, progress=None):
+    """Écrit chaque format demandé à partir du même maillage."""
+    if "stl" in paths:
+        stl_io.write_stl_binary(tris, paths["stl"], progress=progress)
+        log(f"écrit : {os.path.abspath(paths['stl'])}")
+    if "3mf" in paths or "obj" in paths:
+        vertices, faces = mesh_export.index_mesh(tris)
+        log(f"maillage indexé : {len(vertices)} sommets, {len(faces)} triangles")
+        if "3mf" in paths:
+            mesh_export.write_3mf(paths["3mf"], vertices, faces, title=title, description=description,
+                                  copyright_text=attribution)
+            log(f"écrit : {os.path.abspath(paths['3mf'])}")
+        if "obj" in paths:
+            mesh_export.write_obj(paths["obj"], vertices, faces, title=title,
+                                  comment="; ".join(x for x in (description, attribution) if x))
+            log(f"écrit : {os.path.abspath(paths['obj'])}")
 
 
 def validate_geometry(args, from_contour):
@@ -242,7 +341,15 @@ def main():
     p = argparse.ArgumentParser(description="Découpe circulaire d'un DEM + export STL solide.")
     p.add_argument("--input", default=None,
                     help="GeoTIFF ou VRT source ; omis si --source / --download-copernicus est utilisé")
-    p.add_argument("--output", required=True)
+    p.add_argument("--output", default=None,
+                    help="Fichier de sortie. Sans dossier, il est placé dans --output-dir ; avec un dossier, il est "
+                         "respecté. L'extension (.stl, .3mf, .obj) choisit le format. Facultatif : le nom est alors "
+                         "déduit du lieu et du diamètre sans écraser de fichier existant.")
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
+                    help="Dossier des fichiers générés (défaut : %(default)s, créé au besoin)")
+    p.add_argument("--format", default=None,
+                    help="Format(s) de sortie : stl (défaut), 3mf, obj, une liste séparée par des virgules, ou all. "
+                         "Même géométrie, mêmes dimensions (millimètres) dans les trois.")
     p.add_argument("--force", action="store_true",
                     help="Ignore le garde-fou de taille (estimation de RAM supérieure à 80 %% de la RAM disponible)")
     p.add_argument("--debug", action="store_true", help="Affiche la trace complète des erreurs")
@@ -390,8 +497,10 @@ def main():
         args.vexag = ask_float("Exagération verticale", 1.0)
 
     validate_print(args)
-    check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log)
-    prepare_output(args.output)
+    paths = resolve_outputs(args)
+    check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log,
+                    formats=tuple(paths))
+    prepare_outputs(paths)
 
     used = None
     if source:
@@ -431,8 +540,18 @@ def main():
             raise
         fail(f"traitement GDAL impossible : {str(e).strip().splitlines()[0] if str(e).strip() else e} "
              f"(--debug pour la trace complète)")
-    stl_io.write_stl_binary(tris, args.output, progress=progress)
-    log(f"Terminé : {args.output}")
+    stem = os.path.splitext(os.path.basename(next(iter(paths.values()))))[0]
+    srcs = [used] if used else []
+    if args.fill_with_copernicus:
+        srcs.append("copernicus")
+    if args.clip_to_place:
+        srcs.append("osm")
+    attribution = "; ".join(SOURCE_ATTRIBUTION[x] for x in dict.fromkeys(srcs) if x in SOURCE_ATTRIBUTION)
+    description = (f"Relief DEM : {'plus grande dimension' if clip is not None else 'diamètre'} {args.diameter_mm:g} mm, "
+                   f"exagération verticale x{args.vexag:g}, socle {args.base_mm:g} mm"
+                   + (f", source {used}" if used else ""))
+    write_outputs(tris, paths, stem, description, attribution, progress=progress)
+    log("Terminé : " + ", ".join(os.path.abspath(p) for p in paths.values()))
 
 
 if __name__ == "__main__":

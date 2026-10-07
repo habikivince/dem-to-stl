@@ -347,6 +347,31 @@ model built from them. Wording checked against each provider's own pages in Octo
   the development machine, versus several minutes before. Vertices are identical to the old
   writer; normals match to float32 rounding.
 
+### Output folder and formats (STL, 3MF, OBJ)
+
+Generated files go to `output/` (created if needed; change it with `--output-dir`).
+`--output name.stl` (no folder) is placed there; a path with a folder is used as given.
+`--output` is optional: the name is then derived from the place or contour and the
+diameter (`mont-fuji_250mm.stl`) and never replaces an existing file (`_2`, `_3`...).
+
+`--format stl|3mf|obj`, a comma-separated list, or `all` writes several formats from the
+same mesh; the extension of `--output` selects the format when `--format` is absent.
+A name with an unknown extension is still written as an STL under exactly that name.
+
+| Format | Role | Content |
+|---|---|---|
+| STL | compatibility and manufacturing | triangles and normals; no units (millimetres by convention) |
+| 3MF | 3D printing | indexed mesh, **unit declared (millimetre)**, metadata (title, description, data-source attribution, date, application), about 4x smaller |
+| OBJ | exchange and visualisation | vertices and faces only, millimetres stated in a comment; no normals, no `.mtl` (a DEM relief has no material to keep) |
+
+All three contain the same triangles, in the same order, with the same orientation
+(outward normals) and the same float32 coordinates: `check_stl.py` reads any of them, and
+the test suite compares them. The 3MF is a real 3MF package written with the standard
+library (ZIP/OPC, core specification); the official `lib3mf` is used by the tests, when
+installed, as an independent validator. Not checked here: opening in PrusaSlicer itself.
+Measured on 4.9 M triangles: STL 245 MB, 3MF 61 MB, OBJ 192 MB, about 40 s for the three.
+Blender and some viewers import OBJ with Y up: rotate if needed (the file is Z up).
+
 ## Tests
  
 ```bash

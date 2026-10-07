@@ -88,6 +88,14 @@ def build_smooth_rim(loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm):
       - bottom_band_tris : bande dessous, plate, contour en escalier -> cercle vrai
     """
     loop_xyz = [(Xmm[j], Ymm[i], z_top_mm[i, j]) for i, j in loop_ij]
+    # Le sens de parcours du contour (trace_boundary_loop) est arbitraire, or l'orientation des
+    # triangles de la bande et de la paroi en dépend : sans cette normalisation, ils sortaient
+    # retournés (normales vers l'intérieur, volume signé négatif, arêtes mal orientées). Les
+    # triangles ci-dessous sont orientés vers l'extérieur quand la boucle est parcourue dans le
+    # sens horaire en (x, y), vérifié par check_stl.py et lib3mf (aire signée négative).
+    area2 = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(loop_xyz, loop_xyz[1:] + loop_xyz[:1]))
+    if area2 > 0:
+        loop_xyz.reverse()
     n = len(loop_xyz)
 
     projected = []

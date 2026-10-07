@@ -7,5 +7,4 @@ __pycache__/
 .venv/
 venv/
 copernicus_cache/
-*.log
-*.vrt
+output/

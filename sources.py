@@ -753,6 +753,7 @@ def acquire(source, lat, lon, radius_m, cache_dir, pixel_size_m, copernicus_prod
         import download
         tiles = download.download_copernicus(lat, lon, radius_m, cache_dir,
                                              product_m=copernicus_product, log=log)
+        os.makedirs(cache_dir, exist_ok=True)
         vrt = f"{cache_dir.rstrip('/')}/_mosaic.vrt"
         gdal.BuildVRT(vrt, tiles)
         log(f"Mosaïque de {len(tiles)} tuile(s) prête : {vrt}")

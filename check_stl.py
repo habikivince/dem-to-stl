@@ -3,7 +3,7 @@
 """
 check_stl.py
 ------------
-Contrôle indépendant d'un STL binaire produit par circle_dem_to_stl.py : dimensions,
+Contrôle indépendant d'un STL binaire (ou d'un 3MF / OBJ) produit par circle_dem_to_stl.py : dimensions,
 épaisseur du socle, relief implicite, étanchéité du maillage.
 
 Le contrôle ne réutilise pas le code de maillage : il relit le fichier et compare ce
@@ -89,7 +89,7 @@ def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, t
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("stl")
+    p.add_argument("stl", help="fichier .stl (binaire), .3mf ou .obj")
     p.add_argument("--diameter-mm", type=float, required=True, help="valeur donnée à circle_dem_to_stl.py")
     p.add_argument("--base-mm", type=float, required=True)
     p.add_argument("--radius", type=float, default=None, help="rayon en mètres (mode cercle) : active le contrôle du relief")
@@ -100,8 +100,9 @@ def main():
     p.add_argument("--no-watertight", action="store_true", help="saute le test d'étanchéité (gros fichiers)")
     args = p.parse_args()
     try:
-        tris = read_stl(args.stl)
-    except (OSError, ValueError) as e:
+        import mesh_export
+        tris = mesh_export.read_triangles(args.stl)
+    except (OSError, ValueError, KeyError) as e:
         sys.exit(f"Erreur : {e}")
     print(f"{args.stl} : {len(tris)} triangles")
     results = check(tris, args.diameter_mm, args.base_mm, args.radius, args.vexag, args.relief_m,

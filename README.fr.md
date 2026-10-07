@@ -361,6 +361,32 @@ vérifie les conditions en vigueur avant de publier.
   bout en bout sur la machine de développement, contre plusieurs minutes avant. Les sommets
   sont identiques à l'ancien écrivain ; les normales sont égales à l'arrondi float32 près.
 
+### Dossier de sortie et formats (STL, 3MF, OBJ)
+
+Les fichiers générés vont dans `output/` (créé au besoin ; modifiable avec `--output-dir`).
+`--output nom.stl` (sans dossier) y est placé ; un chemin avec dossier est respecté tel quel.
+`--output` est facultatif : le nom est alors déduit du lieu ou du contour et du diamètre
+(`mont-fuji_250mm.stl`) et ne remplace jamais un fichier existant (`_2`, `_3`...).
+
+`--format stl|3mf|obj`, une liste séparée par des virgules, ou `all` écrit plusieurs
+formats à partir du même maillage ; l'extension de `--output` choisit le format quand
+`--format` est absent. Un nom à extension inconnue reste écrit en STL, sous exactement ce nom.
+
+| Format | Rôle | Contenu |
+|---|---|---|
+| STL | compatibilité et fabrication | triangles et normales ; sans unité (millimètres par convention) |
+| 3MF | impression 3D | maillage indexé, **unité déclarée (millimètre)**, métadonnées (titre, description, mention de la source des données, date, application), environ 4 fois plus compact |
+| OBJ | échange et visualisation | sommets et faces seulement, millimètres indiqués en commentaire ; ni normales ni `.mtl` (un relief de DEM n'a pas de matériau à conserver) |
+
+Les trois contiennent les mêmes triangles, dans le même ordre, avec la même orientation
+(normales sortantes) et les mêmes coordonnées float32 : `check_stl.py` lit n'importe lequel,
+et la suite de tests les compare. Le 3MF est un vrai paquet 3MF écrit avec la bibliothèque
+standard (ZIP/OPC, spécification Core) ; `lib3mf`, la bibliothèque officielle, sert aux tests,
+si elle est installée, de validateur indépendant. Non vérifié ici : l'ouverture dans
+PrusaSlicer lui-même. Mesuré sur 4,9 M de triangles : STL 245 Mo, 3MF 61 Mo, OBJ 192 Mo,
+environ 40 s pour les trois. Blender et certains visionneurs importent l'OBJ avec Y vers le
+haut : fais pivoter si besoin (le fichier est Z vers le haut).
+
 ## Tests
 
 ```bash
