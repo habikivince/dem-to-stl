@@ -330,6 +330,23 @@ model built from them. Wording checked against each provider's own pages in Octo
 | Copernicus DEM GLO-30 | Free licence | "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved" when adapted; the licence also asks for a no-liability notice when distributing |
 | OpenStreetMap / Nominatim (`--place`) | ODbL; public server limited to 1 request/second with an identifying User-Agent | "© OpenStreetMap contributors" |
 
+### Safety checks and speed
+
+* Parameters are validated before any download or computation: `--radius`, `--diameter-mm`,
+  `--base-mm` and `--print-spacing-mm` must be strictly positive, `--vexag` must not be
+  negative (0 only warns: flat disc), latitude/longitude must be in range. Invalid or missing
+  input rasters, unreachable data sources and unwritable outputs give a one-line
+  `Erreur : ...` instead of a traceback (`--debug` shows the full trace).
+* The output folder is created if needed and checked first; the STL is written under a
+  temporary name and renamed at the end, so a failure never leaves a truncated file.
+* Before computing, the tool prints an estimate (grid, triangles, STL size, RAM). If the
+  estimated RAM exceeds 80 % of the available RAM (Linux), it stops; `--force` overrides.
+  The constants come from a measured case (4.9 M triangles: about 1.05 GB peak); beyond it
+  the estimate is an extrapolation.
+* The STL writer is vectorised: a 4.9 M-triangle model now takes about 19 s end to end on
+  the development machine, versus several minutes before. Vertices are identical to the old
+  writer; normals match to float32 rounding.
+
 ## Tests
  
 ```bash

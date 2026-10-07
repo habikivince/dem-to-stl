@@ -25,11 +25,12 @@ Usage :
         --lat 35.3606 --lon 138.7274 --radius 9300 --diameter-mm 250
 """
 import argparse
+import math
+import os
 import sys
 
 import numpy as np
 
-import download
 import mesh
 import geocode
 import polygon
@@ -38,6 +39,101 @@ import sources
 import stl_io
 
 log = raster.log
+
+
+RAM_BYTES_PER_TRIANGLE = 220    # mesuré : 1,05 Go de pic pour 4,9 M de triangles
+RAM_BASE_BYTES = 300_000_000
+RAM_SAFETY = 0.8
+MIN_GRID_CELLS = 8
+
+
+def fail(msg):
+    sys.exit(f"Erreur : {msg}")
+
+
+def _pos(v):
+    return v is not None and math.isfinite(v) and v > 0
+
+
+def available_ram_bytes():
+    """RAM disponible (Linux, /proc/meminfo) ou None si inconnue."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False):
+    """Estimation (grille n x n, triangles, taille STL, RAM) d'après le pas d'impression.
+    Cercle : pi*n^2 triangles ; contour : borne haute 4*n^2. Constantes mesurées sur un cas
+    de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation."""
+    n = diameter_mm / spacing_mm
+    triangles = (4.0 if polygon_mode else math.pi) * n * n
+    return {"grid": n, "triangles": triangles, "stl_bytes": 84 + 50 * triangles,
+            "ram_bytes": RAM_BASE_BYTES + RAM_BYTES_PER_TRIANGLE * triangles}
+
+
+def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes):
+    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode)
+    avail = ram_available()
+    log(f"Estimation : grille ~{est['grid']:.0f}², ~{est['triangles'] / 1e6:.1f} M triangles, "
+        f"STL ~{est['stl_bytes'] / 1e6:.0f} Mo, RAM ~{est['ram_bytes'] / 1e9:.1f} Go"
+        + (f" (disponible : {avail / 1e9:.1f} Go)" if avail else ""))
+    if avail and est["ram_bytes"] > RAM_SAFETY * avail and not force:
+        fail(f"cette taille de grille demanderait environ {est['ram_bytes'] / 1e9:.1f} Go de RAM pour "
+             f"{avail / 1e9:.1f} Go disponibles. Augmente --print-spacing-mm ou réduis --diameter-mm, "
+             f"ou ajoute --force pour tenter quand même.")
+    return est
+
+
+def prepare_output(path):
+    """Crée le dossier parent et vérifie qu'on peut écrire, AVANT le calcul."""
+    if os.path.isdir(path):
+        fail(f"--output est un dossier ({path}) : donne un nom de fichier.")
+    parent = os.path.dirname(os.path.abspath(path))
+    probe = path + ".part"
+    try:
+        os.makedirs(parent, exist_ok=True)
+        open(probe, "wb").close()
+        os.remove(probe)
+    except OSError as e:
+        fail(f"impossible d'écrire dans {parent} ({e.strerror or e})")
+
+
+def validate_geometry(args, from_contour):
+    if not from_contour:
+        if not _pos(args.radius):
+            fail("--radius doit être un nombre strictement positif (en mètres).")
+    if args.lat is not None and not (math.isfinite(args.lat) and -90 <= args.lat <= 90):
+        fail(f"latitude hors limites : {args.lat} (attendu entre -90 et 90).")
+    if args.lon is not None and not (math.isfinite(args.lon) and -180 <= args.lon <= 180):
+        fail(f"longitude hors limites : {args.lon} (attendu entre -180 et 180).")
+    for name, v in (("--cx", args.cx), ("--cy", args.cy)):
+        if v is not None and not math.isfinite(v):
+            fail(f"{name} doit être un nombre fini.")
+    if not _pos(args.print_spacing_mm):
+        fail("--print-spacing-mm doit être un nombre strictement positif (en mm).")
+    if args.place_pick < 1:
+        fail("--place-pick commence à 1.")
+
+
+def validate_print(args):
+    if not _pos(args.diameter_mm):
+        fail("--diameter-mm doit être un nombre strictement positif (en mm).")
+    if not _pos(args.base_mm):
+        fail("--base-mm doit être strictement positif : un socle d'épaisseur nulle ou négative "
+             "donne un maillage dégénéré (arêtes non-manifold constatées pour 0).")
+    if not math.isfinite(args.vexag) or args.vexag < 0:
+        fail("--vexag doit être positif : un relief inversé passe sous le socle.")
+    if args.vexag == 0:
+        log("ATTENTION : --vexag 0 donne un disque plat, sans relief.")
+    if args.diameter_mm / args.print_spacing_mm < MIN_GRID_CELLS:
+        fail(f"--print-spacing-mm ({args.print_spacing_mm:g}) est trop grand pour --diameter-mm "
+             f"({args.diameter_mm:g}) : il faut au moins {MIN_GRID_CELLS} cellules sur le diamètre.")
 
 
 def progress(i, n, label):
@@ -147,6 +243,9 @@ def main():
     p.add_argument("--input", default=None,
                     help="GeoTIFF ou VRT source ; omis si --source / --download-copernicus est utilisé")
     p.add_argument("--output", required=True)
+    p.add_argument("--force", action="store_true",
+                    help="Ignore le garde-fou de taille (estimation de RAM supérieure à 80 %% de la RAM disponible)")
+    p.add_argument("--debug", action="store_true", help="Affiche la trace complète des erreurs")
     p.add_argument("--cx", type=float, default=None,
                     help="Centre X du cercle, dans le CRS du fichier source")
     p.add_argument("--cy", type=float, default=None,
@@ -258,6 +357,7 @@ def main():
         if args.input is None and args.source is None and not args.download_copernicus:
             args.source = "auto"
 
+    validate_geometry(args, from_contour=clip is not None)
     have_latlon = args.lat is not None and args.lon is not None
     have_xy = args.cx is not None and args.cy is not None
     if have_latlon and have_xy:
@@ -289,6 +389,10 @@ def main():
     if args.vexag is None:
         args.vexag = ask_float("Exagération verticale", 1.0)
 
+    validate_print(args)
+    check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log)
+    prepare_output(args.output)
+
     used = None
     if source:
         pixel_size_m = args.print_spacing_mm / ((args.diameter_mm / 2.0) / args.radius)
@@ -296,9 +400,14 @@ def main():
             raster.log(f"--full-res : résolution native maximale demandée (le maillage reste à "
                        f"{pixel_size_m:.2f} m/pixel d'après --print-spacing-mm)")
             pixel_size_m = sources.FULL_RES_PIXEL_M
-        used, args.input = sources.acquire(
-            source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
-            copernicus_product=args.copernicus_product, log=raster.log)
+        try:
+            used, args.input = sources.acquire(
+                source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
+                copernicus_product=args.copernicus_product, log=raster.log)
+        except (sources.SourceUnavailable, RuntimeError) as e:
+            if args.debug:
+                raise
+            fail(f"source de données inutilisable : {e}")
         raster.log(f"source utilisée : {used}")
 
     if args.fill_with_copernicus:
@@ -309,10 +418,19 @@ def main():
                 args.input, args.lat, args.lon, args.radius, args.cache_dir,
                 product_m=args.copernicus_product, log=raster.log)
 
-    tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
-                       args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
-                       sea_level=args.sea_level, min_elevation=args.min_elevation,
-                       land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip)
+    try:
+        raster.check_readable(args.input)
+        tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
+                          args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
+                          sea_level=args.sea_level, min_elevation=args.min_elevation,
+                          land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip)
+    except raster.InputError as e:
+        fail(str(e))
+    except RuntimeError as e:
+        if args.debug:
+            raise
+        fail(f"traitement GDAL impossible : {str(e).strip().splitlines()[0] if str(e).strip() else e} "
+             f"(--debug pour la trace complète)")
     stl_io.write_stl_binary(tris, args.output, progress=progress)
     log(f"Terminé : {args.output}")
 

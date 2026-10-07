@@ -19,6 +19,23 @@ def log(msg):
     print(f"[DEM2STL] {msg}", flush=True)
 
 
+class InputError(ValueError):
+    """Raster d'entrée absent ou illisible."""
+
+
+def check_readable(input_path):
+    """Ouvre le raster principal pour échouer tôt avec un message clair (au lieu d'un
+    traceback GDAL au milieu du traitement)."""
+    path = _primary(input_path)
+    try:
+        ds = gdal.Open(path)
+    except RuntimeError as e:
+        reason = str(e).strip().splitlines()[0] if str(e).strip() else "format non reconnu"
+        raise InputError(f"raster illisible : {path} ({reason})")
+    if ds is None or ds.RasterCount < 1:
+        raise InputError(f"raster sans bande : {path}")
+
+
 def _primary(input_path):
     """input_path peut être un chemin unique ou une liste de rasters (sources
     nationales, éventuellement dans des CRS différents) : on utilise le
