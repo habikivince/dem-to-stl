@@ -95,8 +95,8 @@ def main():
     p.add_argument("--radius", type=float, default=None, help="rayon en mètres (mode cercle) : active le contrôle du relief")
     p.add_argument("--vexag", type=float, default=1.0)
     p.add_argument("--relief-m", type=float, default=None,
-                   help="dénivelé attendu en mètres (ex. maximum - minimum de gdalinfo -stats), tolérance 1 %")
-    p.add_argument("--tol-mm", type=float, default=None, help="tolérance sur les dimensions (défaut 1 % du diamètre)")
+                   help="dénivelé attendu en mètres (ex. maximum - minimum de gdalinfo -stats), tolérance 1 %%")
+    p.add_argument("--tol-mm", type=float, default=None, help="tolérance sur les dimensions (défaut 1 %% du diamètre)")
     p.add_argument("--no-watertight", action="store_true", help="saute le test d'étanchéité (gros fichiers)")
     args = p.parse_args()
     try:
