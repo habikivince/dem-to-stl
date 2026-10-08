@@ -387,6 +387,17 @@ PrusaSlicer lui-même. Mesuré sur 4,9 M de triangles : STL 245 Mo, 3MF 61 Mo, O
 environ 40 s pour les trois. Blender et certains visionneurs importent l'OBJ avec Y vers le
 haut : fais pivoter si besoin (le fichier est Z vers le haut).
 
+### Aperçu et paroi lisse
+
+* `--dry-run` valide les paramètres, affiche l'estimation (grille, triangles, taille de chaque
+  format demandé, RAM) et les fichiers qui seraient écrits, puis s'arrête : rien n'est
+  téléchargé, calculé ni écrit.
+* `--smooth-wall` exige un masque à un seul contour. Quand le disque contient un trou (grande
+  zone sans donnée) ou plusieurs parties, l'outil s'arrête désormais avec une explication au
+  lieu de produire un maillage ouvert ; utilise `--sea-level` si le trou est de la mer, ou
+  retire `--smooth-wall`. Les triangles sans aire (un sommet du contour exactement sur le
+  cercle) sont retirés.
+
 ## Tests
 
 ```bash

@@ -372,6 +372,16 @@ installed, as an independent validator. Not checked here: opening in PrusaSlicer
 Measured on 4.9 M triangles: STL 245 MB, 3MF 61 MB, OBJ 192 MB, about 40 s for the three.
 Blender and some viewers import OBJ with Y up: rotate if needed (the file is Z up).
 
+### Previewing and smooth walls
+
+* `--dry-run` validates the parameters, prints the estimate (grid, triangles, size of each
+  requested format, RAM) and the files that would be written, then stops: nothing is
+  downloaded, computed or written.
+* `--smooth-wall` needs a mask with a single outline. When the disc contains a hole (a large
+  area without data) or several parts, the tool now stops with an explanation instead of
+  producing an open mesh; use `--sea-level` if the hole is sea, or drop `--smooth-wall`.
+  Triangles without area (a contour vertex exactly on the circle) are removed.
+
 ## Tests
  
 ```bash

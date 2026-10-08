@@ -353,6 +353,9 @@ def main():
     p.add_argument("--force", action="store_true",
                     help="Ignore le garde-fou de taille (estimation de RAM supérieure à 80 %% de la RAM disponible)")
     p.add_argument("--debug", action="store_true", help="Affiche la trace complète des erreurs")
+    p.add_argument("--dry-run", action="store_true",
+                    help="Valide les paramètres, affiche l'estimation (grille, triangles, taille des fichiers, RAM) "
+                         "et les fichiers prévus, puis s'arrête sans rien télécharger ni écrire")
     p.add_argument("--cx", type=float, default=None,
                     help="Centre X du cercle, dans le CRS du fichier source")
     p.add_argument("--cy", type=float, default=None,
@@ -500,6 +503,10 @@ def main():
     paths = resolve_outputs(args)
     check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log,
                     formats=tuple(paths))
+    if args.dry_run:
+        log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
+            + ", ".join(os.path.abspath(p) for p in paths.values()))
+        return
     prepare_outputs(paths)
 
     used = None

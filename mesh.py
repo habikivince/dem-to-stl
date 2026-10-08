@@ -73,6 +73,17 @@ def trace_boundary_loop(quad_ok):
     return loop
 
 
+def drop_degenerate(tris):
+    """Retire les triangles dont deux sommets sont identiques une fois arrondis en float32 (ce que
+    voient les fichiers de sortie). Ils n'ont ni aire ni volume ; conservés, ils font apparaître des
+    arêtes non-manifold dès qu'on fusionne les sommets (3MF, OBJ). Renvoie (triangles, nombre retiré)."""
+    tris = np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3)
+    t = tris.astype(np.float32)
+    same = (np.all(t[:, 0] == t[:, 1], axis=1) | np.all(t[:, 1] == t[:, 2], axis=1)
+            | np.all(t[:, 0] == t[:, 2], axis=1))
+    return tris[~same], int(same.sum())
+
+
 def build_smooth_rim(loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm):
     """Construit le raccord lisse entre le contour en escalier du masque
     nettoyé et le vrai cercle : chaque point du contour est projeté
@@ -239,13 +250,22 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
 
     if smooth_wall:
         loop_ij = trace_boundary_loop(quad_ok)
+        padded = np.pad(quad_ok, 1, constant_values=False)
+        n_boundary = int(sum((quad_ok & ~padded[a, b]).sum() for a, b in (
+            (slice(None, -2), slice(1, -1)), (slice(2, None), slice(1, -1)),
+            (slice(1, -1), slice(None, -2)), (slice(1, -1), slice(2, None)))))
+        if n_boundary != len(loop_ij):
+            sys.exit("Erreur : --smooth-wall requiert un seul contour : le masque a un trou (zone sans donnée "
+                     "à l'intérieur du disque) ou plusieurs parties. Relance sans --smooth-wall, ou avec "
+                     "--sea-level si le trou est de la mer.")
         if circle_radius_mm is None:
             raise ValueError("smooth_wall=True nécessite circle_radius_mm (le vrai rayon, en mm).")
         radius_mm = circle_radius_mm
         band_tris, wall_tris, bottom_band_tris = build_smooth_rim(
             loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm)
-        extra_tris = np.array(band_tris + bottom_band_tris, dtype=np.float64)
-        wall_tris = np.array(wall_tris, dtype=np.float64)
+        # un sommet du contour déjà exactement sur le cercle donne des triangles sans aire : on les retire
+        extra_tris, _ = drop_degenerate(band_tris + bottom_band_tris)
+        wall_tris, _ = drop_degenerate(wall_tris)
         all_tris = np.concatenate([top_tris, bot_tris, extra_tris, wall_tris])
         return all_tris, len(top_tris), len(bot_tris) + len(bottom_band_tris) + len(band_tris), len(wall_tris)
 
