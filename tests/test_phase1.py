@@ -209,3 +209,17 @@ def test_guard_blocks_oversized_grid_unless_forced(capsys):
 def test_available_ram_is_readable_on_linux():
     ram = circle_dem_to_stl.available_ram_bytes()
     assert ram is None or ram > 0
+
+
+# ---------------------------------------------------------------- aide en ligne de commande
+
+@pytest.mark.parametrize("module", ["check_stl", "compare_dems", "circle_dem_to_stl"])
+def test_help_text_is_well_formed(module, monkeypatch, capsys):
+    """Régression : un « % » non échappé dans une aide argparse faisait planter check_stl.py (dès la
+    construction du parseur avec Python 3.14, au formatage de --help avec les versions précédentes)."""
+    mod = __import__(module)
+    monkeypatch.setattr(sys, "argv", ["x", "--help"])
+    with pytest.raises(SystemExit) as e:
+        mod.main()
+    assert e.value.code == 0
+    assert "usage:" in capsys.readouterr().out
