@@ -73,19 +73,24 @@ def available_ram_bytes():
     return None
 
 
-def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False):
+def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False, bottom="grid"):
     """Estimation (grille n x n, triangles, taille STL, RAM) d'après le pas d'impression.
     Cercle : pi*n^2 triangles ; contour : borne haute 4*n^2. Constantes mesurées sur un cas
-    de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation."""
+    de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation. Avec un fond fusionné
+    (--bottom merged ou merged-rows), le fond ne compte plus : environ la moitié des triangles
+    (mesuré à Ø250 mm : pic de 645 Mo pour 840 Mo estimés). Avec --top adaptive, c'est une borne
+    haute (le nombre réel de triangles dépend du relief)."""
     n = diameter_mm / spacing_mm
     triangles = (4.0 if polygon_mode else math.pi) * n * n
+    if bottom != "grid":
+        triangles /= 2
     return {"grid": n, "triangles": triangles, "stl_bytes": 84 + 50 * triangles,
             "ram_bytes": RAM_BASE_BYTES + RAM_BYTES_PER_TRIANGLE * triangles}
 
 
 def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes,
-                    formats=("stl",)):
-    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode)
+                    formats=("stl",), bottom="grid"):
+    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode, bottom)
     avail = ram_available()
     sizes = ", ".join(f"{f.upper()} ~{est['stl_bytes'] * FORMAT_SIZE_RATIO[f] / 1e6:.0f} Mo" for f in formats)
     log(f"Estimation : grille ~{est['grid']:.0f}², ~{est['triangles'] / 1e6:.1f} M triangles, "
@@ -260,7 +265,8 @@ def ask_float(question, default):
 
 def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
-                smooth_wall=False, clip=None):
+                smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
+                diagonal="fixed", top="grid", top_tol_mm=0.05):
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     clip_rings = None
@@ -280,7 +286,7 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
     log(f"échelle : {scale:.6f} mm/m | résolution de ré-échantillonnage : {pixel_size_m:.3f} m/pixel")
 
     elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m,
-                                              inside_fn=inside_fn)
+                                              inside_fn=inside_fn, resample=resample)
     H, W = elev.shape
     log(f"grille ré-échantillonnée : {W} x {H} points")
 
@@ -332,7 +338,9 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 
     tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
         elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
-        smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None))
+        smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None),
+        bottom=bottom, bottom_max_cells=bottom_max_cells, diagonal=diagonal,
+        top=top, top_tol_mm=top_tol_mm)
     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
     return tris
 
@@ -400,6 +408,31 @@ def main():
                     help="Épaisseur du socle plat, en mm (demandé interactivement si omis)")
     p.add_argument("--print-spacing-mm", type=float, default=0.2,
                     help="Résolution cible du maillage, en mm (~0.2 recommandé pour buse 0.4mm)")
+    p.add_argument("--resample", choices=raster.RESAMPLE_CHOICES, default="auto",
+                    help="Ré-échantillonnage du DEM vers la grille de travail. auto (défaut) : moyenne si "
+                         "la grille est plus grossière que la source, bilinéaire si elle est plus fine "
+                         "(la moyenne de GDAL donnerait alors des paliers plats). cubic dépasse près des "
+                         "falaises (≈ 7 %% de la marche) ; cubicspline lisse sans dépasser.")
+    p.add_argument("--bottom", choices=mesh.BOTTOM_MODES, default="grid",
+                    help="Triangulation du fond plat. grid (défaut) : cellule par cellule. merged "
+                         "(PROTOTYPE) : carrés d'un quadtree équilibré en éventail, même géométrie, environ "
+                         "moitié moins de triangles au total, triangles compacts. merged-rows : rectangles "
+                         "gloutons, encore moins de triangles mais très allongés (comparaison).")
+    p.add_argument("--bottom-max-cells", type=int, default=0,
+                    help="Avec --bottom merged-rows : taille maximale, en cellules, d'un côté de rectangle "
+                         "(0 = pas de limite).")
+    p.add_argument("--diagonal", choices=mesh.DIAGONAL_MODES, default="fixed",
+                    help="Diagonale de coupe des cellules du dessus. fixed (défaut) : toujours la même. "
+                         "adaptive (PROTOTYPE) : celle qui relie les deux coins de plus faible écart "
+                         "d'altitude ; même nombre de triangles, erreur au centre des cellules réduite de 4 à "
+                         "7 %% en moyenne sur six relevés réels.")
+    p.add_argument("--top", choices=mesh.TOP_MODES, default="grid",
+                    help="Triangulation du dessus. grid (défaut) : un ou deux triangles par cellule, exacte aux "
+                         "nœuds. adaptive (PROTOTYPE) : maillage RTIN à erreur bornée, très peu de triangles là où "
+                         "le relief est lisse, bord et parois à pleine résolution.")
+    p.add_argument("--top-tol-mm", type=float, default=0.05,
+                    help="Avec --top adaptive : tolérance verticale, en mm d'impression (défaut 0,05 mm). L'écart "
+                         "entre un nœud du DEM et la surface reste de l'ordre de cette valeur (voir adaptive_top.py).")
     p.add_argument("--sea-level", type=float, default=None,
                     help="Mode île : remplace les pixels invalides/aberrants par un plat à cette altitude "
                          "(m) au lieu de les exclure — le cercle est alors toujours plein.")
@@ -502,7 +535,7 @@ def main():
     validate_print(args)
     paths = resolve_outputs(args)
     check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log,
-                    formats=tuple(paths))
+                    formats=tuple(paths), bottom=args.bottom)
     if args.dry_run:
         log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
             + ", ".join(os.path.abspath(p) for p in paths.values()))
@@ -534,12 +567,19 @@ def main():
                 args.input, args.lat, args.lon, args.radius, args.cache_dir,
                 product_m=args.copernicus_product, log=raster.log)
 
+    if args.top == "adaptive" and args.diagonal != "fixed":
+        fail("--diagonal adaptive est sans objet avec --top adaptive")
+    if args.top_tol_mm < 0:
+        fail("--top-tol-mm doit être >= 0")
     try:
         raster.check_readable(args.input)
         tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
                           args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
                           sea_level=args.sea_level, min_elevation=args.min_elevation,
-                          land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip)
+                          land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip,
+                          resample=args.resample, bottom=args.bottom,
+                          bottom_max_cells=args.bottom_max_cells or None, diagonal=args.diagonal,
+                          top=args.top, top_tol_mm=args.top_tol_mm)
     except raster.InputError as e:
         fail(str(e))
     except RuntimeError as e:

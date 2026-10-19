@@ -61,6 +61,18 @@ def tiles_for_circle(center_lat, center_lon, radius_m, margin_m=2000.0):
     })
 
 
+_TIFF_MAGICS = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def _looks_like_tiff(path):
+    """True si le fichier commence par les octets magiques d'un TIFF (classique ou BigTIFF)."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) in _TIFF_MAGICS
+    except OSError:
+        return False
+
+
 def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=30, log=print):
     """Télécharge (ou réutilise depuis le cache) toutes les tuiles
     Copernicus DEM nécessaires pour couvrir le cercle demandé. Retourne
@@ -81,9 +93,12 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
         name = tile_name(lat_deg, lon_deg, product_m)
         local_path = os.path.join(cache_dir, f"{name}.tif")
         if os.path.exists(local_path):
-            log(f"  {name} : déjà en cache")
-            paths.append(local_path)
-            continue
+            if _looks_like_tiff(local_path):
+                log(f"  {name} : déjà en cache")
+                paths.append(local_path)
+                continue
+            log(f"  {name} : fichier en cache invalide, nouveau téléchargement")
+            os.remove(local_path)
 
         url = tile_url(lat_deg, lon_deg, product_m)
         part = local_path + ".part"
@@ -92,6 +107,14 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
             req = urllib.request.Request(url, headers={"User-Agent": "dem-to-stl"})
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp, open(part, "wb") as out:
                 shutil.copyfileobj(resp, out)
+                announced = resp.headers.get("Content-Length")
+            # copyfileobj ne signale pas une connexion coupée en cours de route : on contrôle la
+            # taille annoncée et le type du fichier avant de le mettre en cache.
+            size = os.path.getsize(part)
+            if announced is not None and announced.isdigit() and int(announced) != size:
+                raise OSError(f"réponse tronquée ({size} octets reçus sur {announced})")
+            if not _looks_like_tiff(part):
+                raise OSError("réponse inattendue : ce n'est pas un GeoTIFF")
             os.replace(part, local_path)  # écriture atomique : jamais de .tif partiel en cache
             paths.append(local_path)
         except urllib.error.HTTPError as e:

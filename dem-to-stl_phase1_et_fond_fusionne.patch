@@ -1,0 +1,1427 @@
+diff --git a/README.fr.md b/README.fr.md
+index 5282ef8..03dec45 100644
+--- a/README.fr.md
++++ b/README.fr.md
+@@ -157,6 +157,9 @@ python circle_dem_to_stl.py \
+ | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
+ | `--vexag` | Exagération verticale | demandée si omise (1.0) |
+ | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
++| `--resample` | Ré-échantillonnage du DEM : `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
++| `--bottom` | Triangulation du fond plat : `grid`, `merged` (prototype), `merged-rows` (comparaison) | `grid` |
++| `--bottom-max-cells` | Avec `merged-rows` : côté maximal d'un rectangle, en cellules (0 = sans limite) | 0 |
+ | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
+ | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
+ | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
+@@ -245,7 +248,8 @@ les résultats sont mis en cache dans `--cache-dir`. Données de géocodage
+ ### Résolution et qualité des sources automatiques
+ 
+ Le maillage est limité par `--print-spacing-mm` : le DEM est ré-échantillonné
+-(`average`) à `print-spacing / échelle` mètres par pixel (affiché comme « résolution
++(`average` quand la grille de travail est plus grossière que la source, voir `--resample`
++ci-dessous) à `print-spacing / échelle` mètres par pixel (affiché comme « résolution
+ de ré-échantillonnage » dans le log, par ex. 8 m pour une impression de 150 mm d'un
+ rayon de 3 km). Les sources ne récupèrent donc que la résolution utile à cette grille
+ (swisstopo 2 m au lieu de 0,5 m, tuiles GSI au zoom correspondant, requêtes WCS/WMS à
+@@ -257,6 +261,29 @@ une grille quasi identique.
+   lourds, maillage de même taille). Sans lui, Kartverket et IGN ré-échantillonnent côté
+   serveur (plus proche voisin) à 2x la résolution de travail avant de moyenner ;
+   `--full-res` supprime ce raccourci.
++* `--resample auto` (défaut) utilise `average` quand la grille de travail est plus grossière
++  que la source (la moyenne fait de l'anticrénelage) et `bilinear` quand elle est plus fine,
++  c'est-à-dire quand le DEM est agrandi (par exemple un DEM mondial de 30 m sur un petit
++  rayon, ou le repli Copernicus). Le `average` de GDAL se comporte alors comme le plus
++  proche voisin : la surface devient des paliers plats séparés par des marches (dans un
++  test synthétique, 25 à 77 % des cellules avaient une pente exactement nulle pour un
++  agrandissement de 4x à 16x). Le log indique « ré-échantillonnage bilinear » quand c'est
++  le cas. `cubic` peut dépasser près des falaises (environ 7 % de la marche, soit 71 m
++  sur une falaise de 1000 m) ; `cubicspline` lisse sans dépasser ; `average` impose
++  l'ancien comportement.
++* `--bottom merged` (prototype, le défaut reste `grid`) triangule le fond plat avec les carrés d'un
++  quadtree équilibré, chacun en éventail gardant tous les nœuds de contour nécessaires : aucune
++  jonction en T, le solide reste étanche. La géométrie est identique (même plan, même contour,
++  même volume : les tests les comparent à 1e-12) mais le fichier a environ moitié moins de
++  triangles (le fond perd 96 à 99 %), un pic de RAM plus bas et une taille réduite. Les triangles
++  restent compacts (allongement d'au plus 4 dans les tests). `merged-rows` utilise des rectangles
++  gloutons (la méthode du dépôt my3dmaps) : encore moins de triangles, mais extrêmement allongés
++  (allongement supérieur à 10^5 mesuré sur un disque), conservé pour comparaison seulement.
++  Vérifiez le résultat dans votre trancheur et votre FAO avant d'en faire le défaut.
++* Les téléchargements sont contrôlés : une réponse tronquée est retentée, et une page
++  d'erreur reçue en HTTP 200 (XML/HTML au lieu d'un GeoTIFF ou d'un PNG) n'est ni mise en
++  cache ni réutilisée si une exécution précédente l'y avait enregistrée (le fichier
++  invalide est retéléchargé).
+ * Les tuiles d'élévation GSI sont dérivées du DEM (interpolées, pas de 1 cm), pas le
+   maillage JPGIS brut ; leur nombre est plafonné, donc une très grande zone utilise un
+   zoom plus grossier.
+@@ -310,7 +337,9 @@ python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --rel
+ Relit le STL binaire (indépendamment du code de maillage) et vérifie la plus grande
+ dimension horizontale, l'épaisseur du socle, le dénivelé impliqué par l'échelle (avec
+ `--radius`, éventuellement comparé à `--relief-m`, tolérance 1 %) et l'étanchéité
+-(arêtes ouvertes, non-manifold ou mal orientées). Code de sortie 1 en cas d'échec ;
++(arêtes ouvertes, non-manifold ou mal orientées), le signe du volume signé (un solide
++entièrement retourné est cohérent arête par arête : seul ce signe le révèle) et les
++triangles dégénérés. Code de sortie 1 en cas d'échec ;
+ `--tol-mm` règle la tolérance sur les dimensions, `--no-watertight` saute le test des
+ arêtes sur de très gros fichiers.
+ 
+diff --git a/README.md b/README.md
+index e321af6..bedf05e 100644
+--- a/README.md
++++ b/README.md
+@@ -153,6 +153,9 @@ python circle_dem_to_stl.py \
+ | `--base-mm` | Flat base thickness, in mm | prompted if omitted (3) |
+ | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
+ | `--print-spacing-mm` | Target mesh resolution, in mm | 0.2 |
++| `--resample` | DEM resampling: `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
++| `--bottom` | Flat-bottom triangulation: `grid`, `merged` (prototype), `merged-rows` (comparison) | `grid` |
++| `--bottom-max-cells` | With `merged-rows`: maximum rectangle side, in cells (0 = unlimited) | 0 |
+ | `--sea-level` | Enables island mode at this elevation (m) | disabled |
+ | `--min-elevation` | Threshold for excluding interpolation artifacts, in m | -50 |
+ | `--land-threshold` | Land/water-noise threshold above `--sea-level`, in m | 1.0 |
+@@ -238,7 +241,8 @@ allows 1 request per second and expects an identifying User-Agent (override with
+ 
+ ### Resolution and quality of automatic sources
+ 
+-The mesh is limited by `--print-spacing-mm`: the DEM is resampled (`average`) to
++The mesh is limited by `--print-spacing-mm`: the DEM is resampled (`average` when the
++working grid is coarser than the source, see `--resample` below) to
+ `print-spacing / scale` metres per pixel (shown as "résolution de ré-échantillonnage"
+ in the log, e.g. 8 m for a 150 mm print of a 3 km radius). Sources therefore fetch
+ only the resolution needed for that grid (swisstopo 2 m instead of 0.5 m, GSI tiles
+@@ -251,6 +255,27 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
+   twice the working resolution before averaging; `--full-res` removes that shortcut.
+ * GSI elevation tiles are derived from the DEM (interpolated, 1 cm steps), not the
+   raw JPGIS mesh; the number of tiles is capped, so very large areas use a coarser zoom.
++* `--resample auto` (default) uses `average` when the working grid is coarser than the
++  source (averaging is anti-aliasing) and `bilinear` when it is finer, i.e. when the DEM
++  is enlarged (for example a 30 m global DEM on a small radius, or the Copernicus
++  fallback). GDAL's `average` then behaves like nearest neighbour: the surface becomes
++  flat plateaus separated by steps (in a synthetic test, 25 to 77 % of the cells had
++  exactly zero slope at 4x to 16x enlargement). The log says "ré-échantillonnage bilinear"
++  when this applies. `cubic` can overshoot near cliffs (about 7 % of a step, i.e. 71 m on
++  a 1000 m cliff); `cubicspline` smooths without overshooting; `average` forces the
++  previous behaviour.
++* `--bottom merged` (prototype, default stays `grid`) triangulates the flat bottom with the squares
++  of a balanced quadtree, each one as a fan that keeps every required boundary node, so there
++  is no T-junction and the solid stays watertight. The geometry is identical (same plane, same
++  outline, same volume: the tests compare them to 1e-12) but the file has about half the
++  triangles (the bottom drops by 96 to 99 %), a lower RAM peak and a smaller file. The
++  triangles stay compact (aspect ratio at most 4 in the tests). `merged-rows` uses greedy
++  rectangles instead (the method of the my3dmaps project): even fewer triangles, but extremely
++  elongated ones (aspect ratio above 10^5 measured on a disc), kept for comparison only.
++  Check the result in your slicer and CAM before making it the default.
++* Downloads are checked: a truncated answer is retried, and an error page received with
++  HTTP 200 (XML/HTML instead of a GeoTIFF or PNG) is neither cached nor reused if an
++  earlier run stored it (the invalid cached file is downloaded again).
+ * `compare_dems.py A B --lat .. --lon .. --radius .. --pixel-size ..` measures the
+   difference between two DEMs on the working grid (mean offset, RMS, 95th percentile)
+   to check an automatic source against manually downloaded data.
+@@ -299,7 +324,9 @@ python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --rel
+ Re-reads the binary STL (independently of the meshing code) and checks the largest
+ horizontal dimension, the base thickness, the elevation range implied by the scale
+ (with `--radius`, optionally against `--relief-m`, tolerance 1 %) and watertightness
+-(open, non-manifold or badly oriented edges). Exit code 1 on failure; `--tol-mm`
++(open, non-manifold or badly oriented edges), the sign of the signed volume (an entirely
++inside-out solid is consistent edge by edge and only this sign reveals it) and degenerate
++triangles. Exit code 1 on failure; `--tol-mm`
+ adjusts the dimension tolerance, `--no-watertight` skips the edge test on huge files.
+ 
+ ### Place outlines (`--place ... --clip-to-place`)
+diff --git a/bottom.py b/bottom.py
+new file mode 100644
+index 0000000..f8b9c23
+--- /dev/null
++++ b/bottom.py
+@@ -0,0 +1,169 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""
++bottom.py
++---------
++Fond plat « fusionné » (PROTOTYPE, option --bottom merged).
++
++Le fond du socle est un plan : le trianguler cellule par cellule (2 triangles par cellule, comme le
++dessus) double le nombre de triangles sans rien apporter. Ici les cellules du masque sont couvertes
++par des rectangles (couverture gloutonne), et chaque rectangle est triangulé en éventail depuis son
++centre en ne gardant que les nœuds *requis* de son contour :
++
++  * les nœuds du bord du masque (les parois verticales y sont accrochées, une par arête de cellule) ;
++  * les quatre coins de chaque rectangle (les rectangles voisins s'y accrochent).
++
++Deux rectangles voisins voient donc exactement les mêmes nœuds le long de leur arête commune : aucune
++jonction en T, le solide reste étanche (chaque arête partagée par exactement deux triangles) et la
++géométrie est identique à celle du fond cellule par cellule (même plan, même contour, même volume).
++
++Deux couvertures sont disponibles :
++
++  * ``graded`` (défaut) : carrés d'un quadtree équilibré (deux carrés voisins diffèrent d'un facteur 2
++    au plus ; les cellules du bord restent des carrés d'une cellule). Les triangles restent compacts.
++  * ``rows`` : rectangles gloutons ligne par ligne, c'est la méthode du dépôt my3dmaps. Très peu de
++    triangles, mais des rectangles d'une cellule de haut sur des centaines de large : l'éventail depuis
++    le centre y produit des triangles-aiguilles (mesuré : allongement jusqu'à 10^5 et angle minimal
++    de l'ordre de 10^-3 degré sur un disque de 600 cellules). Conservée pour comparaison ;
++    ``max_cells`` borne alors la taille des rectangles.
++
++Idée inspirée du dépôt my3dmaps (licence MIT), ré-implémentée ici de façon indépendante.
++"""
++import numpy as np
++
++
++def cover_with_rectangles(quad_ok, max_cells=None):
++    """Couvre exactement les cellules vraies de ``quad_ok`` (H, W) par des rectangles disjoints.
++
++    Balayage ligne par ligne : chaque plage horizontale de cellules libres est étendue vers le bas tant
++    que les lignes suivantes ont les mêmes cellules libres sur toute la plage. ``max_cells`` (entier >= 1)
++    borne le côté des rectangles (None : pas de borne). Renvoie une liste de (i0, i1, j0, j1), bornes
++    incluses, en indices de cellules."""
++    if max_cells is not None and max_cells < 1:
++        raise ValueError("max_cells doit être >= 1 (ou None)")
++    todo = np.array(quad_ok, dtype=bool, copy=True)
++    H, W = todo.shape
++    rects = []
++    for i in range(H):
++        row = todo[i]
++        if not row.any():
++            continue
++        edges = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
++        starts, ends = np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0] - 1
++        for j0, j1 in zip(starts, ends):
++            segs = [(j0, j1)] if max_cells is None else [
++                (a, min(a + max_cells - 1, j1)) for a in range(j0, j1 + 1, max_cells)]
++            for a, b in segs:
++                i1 = i
++                while i1 + 1 < H and (max_cells is None or i1 - i + 1 < max_cells) and todo[i1 + 1, a:b + 1].all():
++                    i1 += 1
++                todo[i:i1 + 1, a:b + 1] = False
++                rects.append((i, i1, int(a), int(b)))
++    return rects
++
++
++def cover_with_graded_squares(quad_ok):
++    """Couvre exactement les cellules vraies de ``quad_ok`` par des carrés de côté 2^k alignés (quadtree),
++    avec la contrainte d'équilibre : deux carrés qui se touchent par un côté ont des tailles qui diffèrent
++    d'un facteur 2 au plus. Un carré n'est conservé que s'il est entièrement dans le masque : les cellules du
++    bord restent des carrés d'une cellule. Renvoie une liste de (i0, i1, j0, j1), bornes incluses."""
++    quad_ok = np.asarray(quad_ok, dtype=bool)
++    H, W = quad_ok.shape
++    N = 1
++    while N < max(H, W):
++        N *= 2
++    q = np.zeros((N, N), dtype=bool)
++    q[:H, :W] = quad_ok
++    sat = np.zeros((N + 1, N + 1), dtype=np.int64)          # table des sommes cumulées : comptage O(1) par bloc
++    sat[1:, 1:] = q.cumsum(0).cumsum(1)
++
++    def count(i, j, s):
++        return sat[i + s, j + s] - sat[i, j + s] - sat[i + s, j] + sat[i, j]
++
++    leaves, stack = [], [(0, 0, N)]
++    while stack:
++        i, j, s = stack.pop()
++        c = count(i, j, s)
++        if c == 0:
++            continue
++        if c == s * s:
++            leaves.append((i, j, s))
++        else:                                               # s >= 2 ici : un carré d'une cellule est plein ou vide
++            h = s // 2
++            stack += [(i, j, h), (i, j + h, h), (i + h, j, h), (i + h, j + h, h)]
++
++    size_map = np.zeros((N, N), dtype=np.int32)
++    for i, j, s in leaves:
++        size_map[i:i + s, j:j + s] = s
++    big = N * 4
++    changed = True
++    while changed:                                          # équilibrage : on coupe un carré dont un voisin est plus de 2 fois plus petit
++        changed, nxt = False, []
++        for i, j, s in leaves:
++            if s == 1:
++                nxt.append((i, j, s))
++                continue
++            sides = []
++            if i > 0:
++                sides.append(size_map[i - 1, j:j + s])
++            if i + s < N:
++                sides.append(size_map[i + s, j:j + s])
++            if j > 0:
++                sides.append(size_map[i:i + s, j - 1])
++            if j + s < N:
++                sides.append(size_map[i:i + s, j + s])
++            smallest = min((int(np.where(v > 0, v, big).min()) for v in sides), default=big)
++            if smallest * 2 < s:
++                h = s // 2
++                size_map[i:i + s, j:j + s] = h
++                nxt += [(i, j, h), (i, j + h, h), (i + h, j, h), (i + h, j + h, h)]
++                changed = True
++            else:
++                nxt.append((i, j, s))
++        leaves = nxt
++    return [(i, i + s - 1, j, j + s - 1) for i, j, s in leaves]
++
++
++def required_nodes(quad_ok, rects):
++    """Masque booléen (H+1, W+1) des nœuds à conserver : nœuds dont les quatre cellules voisines ne sont
++    pas toutes dans le masque (bord, trous), plus les quatre coins de chaque rectangle."""
++    q = np.pad(np.asarray(quad_ok, dtype=bool), 1, constant_values=False)
++    req = ~(q[1:, 1:] & q[1:, :-1] & q[:-1, :-1] & q[:-1, 1:])
++    for i0, i1, j0, j1 in rects:
++        req[i0, j0] = req[i0, j1 + 1] = req[i1 + 1, j1 + 1] = req[i1 + 1, j0] = True
++    return req
++
++
++COVERS = ("graded", "rows")
++
++
++def merged_bottom_triangles(quad_ok, Xmm, Ymm, z_mm, max_cells=None, cover="graded"):
++    """Triangles (N, 3, 3) du fond plat à l'altitude ``z_mm``, normales vers -z, couvrant exactement les
++    cellules de ``quad_ok``. Xmm[j] et Ymm[i] sont les coordonnées des nœuds (colonne j, ligne i), comme dans
++    mesh.build_mesh_from_arrays. ``cover`` : "graded" (défaut, carrés équilibrés) ou "rows" (rectangles gloutons,
++    ``max_cells`` borne alors leur taille). Voir le docstring du module."""
++    if cover == "graded":
++        rects = cover_with_graded_squares(quad_ok)
++    elif cover == "rows":
++        rects = cover_with_rectangles(quad_ok, max_cells)
++    else:
++        raise ValueError(f"cover : valeur inconnue {cover!r} (choix : {', '.join(COVERS)})")
++    req = required_nodes(quad_ok, rects)
++    tris = []
++    for i0, i1, j0, j1 in rects:
++        # contour dans le sens horaire vu d'en haut (x vers la droite, y vers le haut ; i croît vers le bas) :
++        # haut de gauche à droite, droite de haut en bas, bas de droite à gauche, gauche de bas en haut.
++        top = [(i0, j) for j in range(j0, j1 + 1) if req[i0, j]]
++        right = [(i, j1 + 1) for i in range(i0, i1 + 1) if req[i, j1 + 1]]
++        bottom = [(i1 + 1, j) for j in range(j1 + 1, j0, -1) if req[i1 + 1, j]]
++        left = [(i, j0) for i in range(i1 + 1, i0, -1) if req[i, j0]]
++        ring = top + right + bottom + left
++        pts = np.array([(Xmm[j], Ymm[i], z_mm) for i, j in ring], dtype=np.float64)
++        if len(ring) == 4:                       # coins seulement : deux triangles suffisent
++            tris.append(np.stack([pts[[0, 1, 2]], pts[[0, 2, 3]]]))
++            continue
++        centre = np.array([(Xmm[j0] + Xmm[j1 + 1]) / 2.0, (Ymm[i0] + Ymm[i1 + 1]) / 2.0, z_mm])
++        nxt = np.roll(pts, -1, axis=0)
++        tris.append(np.stack([np.broadcast_to(centre, pts.shape), pts, nxt], axis=1))
++    if not tris:
++        return np.empty((0, 3, 3), dtype=np.float64)
++    return np.concatenate(tris)
+diff --git a/check_stl.py b/check_stl.py
+index 376f20b..8e0dcb4 100644
+--- a/check_stl.py
++++ b/check_stl.py
+@@ -4,7 +4,8 @@
+ check_stl.py
+ ------------
+ Contrôle indépendant d'un STL binaire (ou d'un 3MF / OBJ) produit par circle_dem_to_stl.py : dimensions,
+-épaisseur du socle, relief implicite, étanchéité du maillage.
++épaisseur du socle, relief implicite, étanchéité du maillage, orientation (volume signé) et triangles
++dégénérés.
+ 
+ Le contrôle ne réutilise pas le code de maillage : il relit le fichier et compare ce
+ qu'il contient à ce que les paramètres imposent.
+@@ -57,6 +58,31 @@ def edge_report(tris):
+             "nonmanifold_edges": int((counts > 2).sum()), "duplicate_directed_edges": int((dcounts > 1).sum())}
+ 
+ 
++def signed_volume(tris, block=1_000_000):
++    """Volume signé (mm³) d'un maillage de triangles (N, 3, 3), par la somme des produits mixtes
++    v0 · (v1 x v2) / 6. Positif quand les faces sont tournées vers l'extérieur du solide. Un maillage
++    entièrement retourné reste « étanche » et cohérent arête par arête : seul ce signe le révèle."""
++    total = 0.0
++    for i in range(0, len(tris), block):
++        t = tris[i:i + block]
++        total += float(np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum())
++    return total / 6.0
++
++
++def degenerate_count(tris, block=1_000_000):
++    """Nombre de triangles d'aire nulle : deux sommets identiques une fois arrondis en float32 (ce
++    que voient les fichiers de sortie) ou trois sommets exactement alignés (produit vectoriel nul)."""
++    n = 0
++    for i in range(0, len(tris), block):
++        t = tris[i:i + block]
++        f = t.astype(np.float32)
++        same = (np.all(f[:, 0] == f[:, 1], axis=1) | np.all(f[:, 1] == f[:, 2], axis=1)
++                | np.all(f[:, 0] == f[:, 2], axis=1))
++        cross = np.cross(f[:, 1].astype(np.float64) - f[:, 0], f[:, 2].astype(np.float64) - f[:, 0])
++        n += int((same | ~np.any(cross != 0.0, axis=1)).sum())
++    return n
++
++
+ def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, tol_mm=None, watertight=True):
+     """Liste de (nom, ok, détail). tol_mm : tolérance sur les dimensions (défaut 1 % du diamètre)."""
+     tol_mm = 0.01 * diameter_mm if tol_mm is None else tol_mm
+@@ -84,6 +110,12 @@ def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, t
+         results.append(("étanchéité", ok,
+                         f"{r['vertices']} sommets, {r['boundary_edges']} arête(s) ouverte(s), "
+                         f"{r['nonmanifold_edges']} non-manifold, {r['duplicate_directed_edges']} mal orientée(s)"))
++        vol = signed_volume(tris)
++        results.append(("orientation (volume signé)", vol > 0,
++                        f"{vol:.1f} mm³" + (" (faces tournées vers l'extérieur)" if vol > 0
++                                            else " : NÉGATIF ou nul, faces tournées vers l'intérieur")))
++        nd = degenerate_count(tris)
++        results.append(("triangles dégénérés", nd == 0, f"{nd} triangle(s) d'aire nulle"))
+     return results
+ 
+ 
+diff --git a/circle_dem_to_stl.py b/circle_dem_to_stl.py
+index b7137cb..63932f9 100644
+--- a/circle_dem_to_stl.py
++++ b/circle_dem_to_stl.py
+@@ -260,7 +260,7 @@ def ask_float(question, default):
+ 
+ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
+                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
+-                smooth_wall=False, clip=None):
++                smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None):
+     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
+ 
+     clip_rings = None
+@@ -280,7 +280,7 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
+     log(f"échelle : {scale:.6f} mm/m | résolution de ré-échantillonnage : {pixel_size_m:.3f} m/pixel")
+ 
+     elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m,
+-                                              inside_fn=inside_fn)
++                                              inside_fn=inside_fn, resample=resample)
+     H, W = elev.shape
+     log(f"grille ré-échantillonnée : {W} x {H} points")
+ 
+@@ -332,7 +332,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
+ 
+     tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
+         elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
+-        smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None))
++        smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None),
++        bottom=bottom, bottom_max_cells=bottom_max_cells)
+     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
+     return tris
+ 
+@@ -400,6 +401,19 @@ def main():
+                     help="Épaisseur du socle plat, en mm (demandé interactivement si omis)")
+     p.add_argument("--print-spacing-mm", type=float, default=0.2,
+                     help="Résolution cible du maillage, en mm (~0.2 recommandé pour buse 0.4mm)")
++    p.add_argument("--resample", choices=raster.RESAMPLE_CHOICES, default="auto",
++                    help="Ré-échantillonnage du DEM vers la grille de travail. auto (défaut) : moyenne si "
++                         "la grille est plus grossière que la source, bilinéaire si elle est plus fine "
++                         "(la moyenne de GDAL donnerait alors des paliers plats). cubic dépasse près des "
++                         "falaises (≈ 7 %% de la marche) ; cubicspline lisse sans dépasser.")
++    p.add_argument("--bottom", choices=mesh.BOTTOM_MODES, default="grid",
++                    help="Triangulation du fond plat. grid (défaut) : cellule par cellule. merged "
++                         "(PROTOTYPE) : carrés d'un quadtree équilibré en éventail, même géométrie, environ "
++                         "moitié moins de triangles au total, triangles compacts. merged-rows : rectangles "
++                         "gloutons, encore moins de triangles mais très allongés (comparaison).")
++    p.add_argument("--bottom-max-cells", type=int, default=0,
++                    help="Avec --bottom merged-rows : taille maximale, en cellules, d'un côté de rectangle "
++                         "(0 = pas de limite).")
+     p.add_argument("--sea-level", type=float, default=None,
+                     help="Mode île : remplace les pixels invalides/aberrants par un plat à cette altitude "
+                          "(m) au lieu de les exclure — le cercle est alors toujours plein.")
+@@ -539,7 +553,9 @@ def main():
+         tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
+                           args.diameter_mm, args.vexag, args.base_mm, args.print_spacing_mm,
+                           sea_level=args.sea_level, min_elevation=args.min_elevation,
+-                          land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip)
++                          land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip,
++                          resample=args.resample, bottom=args.bottom,
++                          bottom_max_cells=args.bottom_max_cells or None)
+     except raster.InputError as e:
+         fail(str(e))
+     except RuntimeError as e:
+diff --git a/download.py b/download.py
+index 29f23d9..f4a6f8d 100644
+--- a/download.py
++++ b/download.py
+@@ -61,6 +61,18 @@ def tiles_for_circle(center_lat, center_lon, radius_m, margin_m=2000.0):
+     })
+ 
+ 
++_TIFF_MAGICS = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
++
++
++def _looks_like_tiff(path):
++    """True si le fichier commence par les octets magiques d'un TIFF (classique ou BigTIFF)."""
++    try:
++        with open(path, "rb") as f:
++            return f.read(4) in _TIFF_MAGICS
++    except OSError:
++        return False
++
++
+ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=30, log=print):
+     """Télécharge (ou réutilise depuis le cache) toutes les tuiles
+     Copernicus DEM nécessaires pour couvrir le cercle demandé. Retourne
+@@ -81,9 +93,12 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
+         name = tile_name(lat_deg, lon_deg, product_m)
+         local_path = os.path.join(cache_dir, f"{name}.tif")
+         if os.path.exists(local_path):
+-            log(f"  {name} : déjà en cache")
+-            paths.append(local_path)
+-            continue
++            if _looks_like_tiff(local_path):
++                log(f"  {name} : déjà en cache")
++                paths.append(local_path)
++                continue
++            log(f"  {name} : fichier en cache invalide, nouveau téléchargement")
++            os.remove(local_path)
+ 
+         url = tile_url(lat_deg, lon_deg, product_m)
+         part = local_path + ".part"
+@@ -92,6 +107,14 @@ def download_copernicus(center_lat, center_lon, radius_m, cache_dir, product_m=3
+             req = urllib.request.Request(url, headers={"User-Agent": "dem-to-stl"})
+             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp, open(part, "wb") as out:
+                 shutil.copyfileobj(resp, out)
++                announced = resp.headers.get("Content-Length")
++            # copyfileobj ne signale pas une connexion coupée en cours de route : on contrôle la
++            # taille annoncée et le type du fichier avant de le mettre en cache.
++            size = os.path.getsize(part)
++            if announced is not None and announced.isdigit() and int(announced) != size:
++                raise OSError(f"réponse tronquée ({size} octets reçus sur {announced})")
++            if not _looks_like_tiff(part):
++                raise OSError("réponse inattendue : ce n'est pas un GeoTIFF")
+             os.replace(part, local_path)  # écriture atomique : jamais de .tif partiel en cache
+             paths.append(local_path)
+         except urllib.error.HTTPError as e:
+diff --git a/mesh.py b/mesh.py
+index 856341d..7337f2b 100644
+--- a/mesh.py
++++ b/mesh.py
+@@ -12,6 +12,8 @@ import sys
+ import numpy as np
+ from scipy import ndimage
+ 
++from bottom import merged_bottom_triangles
++
+ 
+ def trace_boundary_loop(quad_ok):
+     """Trace la boucle fermée simple formant le contour du masque de
+@@ -161,14 +163,20 @@ def dilate3x3(m):
+     return out
+ 
+ 
+-def fix_diagonal_pinches(quad_ok, max_iterations=4):
++def fix_diagonal_pinches(quad_ok, max_iterations=None):
+     """Élimine les pincements en diagonale : deux cellules incluses qui ne se
+     touchent que par un coin (motif "damier" sur un bloc 2x2) créent un
+     sommet où deux nappes de surface se rejoignent en un point unique —
+     épaisseur quasi nulle, indétectable par un simple test d'étanchéité par
+     arêtes. On comble les deux cases manquantes plutôt que de retirer de
+-    la matière. Modifie quad_ok sur place et le retourne."""
+-    for _ in range(max_iterations):
++    la matière. Modifie quad_ok sur place et le retourne.
++
++    Le comblement peut créer de nouveaux pincements voisins : on itère donc
++    jusqu'à stabilité. Il ne fait qu'ajouter des cellules (monotone), donc la
++    boucle termine en au plus quad_ok.size passes. ``max_iterations`` reste
++    un plafond optionnel (None = jusqu'à stabilité)."""
++    limit = quad_ok.size if max_iterations is None else max_iterations
++    for _ in range(limit):
+         diag1 = quad_ok[:-1, :-1] & quad_ok[1:, 1:] & ~quad_ok[:-1, 1:] & ~quad_ok[1:, :-1]
+         diag2 = quad_ok[:-1, 1:] & quad_ok[1:, :-1] & ~quad_ok[:-1, :-1] & ~quad_ok[1:, 1:]
+         if not (diag1.any() or diag2.any()):
+@@ -201,8 +209,12 @@ def largest_connected_component(seed_mask):
+     return labeled == largest_label, n_components, sizes
+ 
+ 
++BOTTOM_MODES = ("grid", "merged", "merged-rows")
++
++
+ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev,
+-                            progress=None, smooth_wall=False, circle_radius_mm=None):
++                            progress=None, smooth_wall=False, circle_radius_mm=None,
++                            bottom="grid", bottom_max_cells=None):
+     """Construit le maillage (triangles dessus/dessous/parois) à partir d'un
+     tableau d'altitudes déjà découpé et d'un masque de cellules (quad_ok)
+     déjà nettoyé. Ne touche jamais au disque ni à GDAL — testable avec de
+@@ -213,7 +225,13 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
+     smooth_wall=True : au lieu de suivre le contour en escalier du masque,
+     chaque point du contour est projeté radialement vers le vrai cercle
+     (même altitude), formant un bord parfaitement circulaire. Requiert un
+-    masque à un seul contour simple (voir trace_boundary_loop)."""
++    masque à un seul contour simple (voir trace_boundary_loop).
++
++    bottom="grid" (défaut) : fond triangulé cellule par cellule (comme le dessus).
++    bottom="merged" (PROTOTYPE) : fond plat couvert par des carrés d'un quadtree équilibré, triangulés en
++    éventail sans jonction en T (voir bottom.py) ; même géométrie, environ moitié moins de triangles au total,
++    triangles compacts. bottom="merged-rows" : couverture par rectangles gloutons (très peu de triangles mais
++    triangles-aiguilles) ; bottom_max_cells borne alors la taille des rectangles (None : pas de borne)."""
+     def _progress(i, n, label):
+         if progress is not None:
+             progress(i, n, label)
+@@ -239,14 +257,21 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
+     ])
+ 
+     zb = -base_mm
+-    c00b, c10b, c01b, c11b = c00.copy(), c10.copy(), c01.copy(), c11.copy()
+-    for c in (c00b, c10b, c01b, c11b):
+-        c[:, 2] = zb
+-
+-    bot_tris = np.concatenate([
+-        np.stack([c00b, c01b, c10b], axis=1),
+-        np.stack([c10b, c01b, c11b], axis=1),
+-    ])
++    if bottom == "merged":
++        bot_tris = merged_bottom_triangles(quad_ok, Xmm, Ymm, zb, cover="graded")
++    elif bottom == "merged-rows":
++        bot_tris = merged_bottom_triangles(quad_ok, Xmm, Ymm, zb, bottom_max_cells, cover="rows")
++    elif bottom == "grid":
++        c00b, c10b, c01b, c11b = c00.copy(), c10.copy(), c01.copy(), c11.copy()
++        for c in (c00b, c10b, c01b, c11b):
++            c[:, 2] = zb
++
++        bot_tris = np.concatenate([
++            np.stack([c00b, c01b, c10b], axis=1),
++            np.stack([c10b, c01b, c11b], axis=1),
++        ])
++    else:
++        raise ValueError(f"bottom : valeur inconnue {bottom!r} (choix : {', '.join(BOTTOM_MODES)})")
+ 
+     if smooth_wall:
+         loop_ij = trace_boundary_loop(quad_ok)
+diff --git a/raster.py b/raster.py
+index a58804a..fb753b5 100644
+--- a/raster.py
++++ b/raster.py
+@@ -6,6 +6,7 @@ Tout ce qui touche GDAL : ouverture du fichier source, détection et
+ reprojection automatique du CRS, ré-échantillonnage fenêtré autour du
+ centre choisi. Aucune logique géométrique ici (voir mesh.py).
+ """
++import math
+ import sys
+ 
+ import numpy as np
+@@ -190,8 +191,61 @@ def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m,
+         f"ajoutées depuis la source secondaire, à plus faible résolution : raccord visible à la limite")
+ 
+ 
++RESAMPLE_CHOICES = ("auto", "average", "bilinear", "cubic", "cubicspline")
++# Au-delà de ce rapport (pixel de la source / pixel de travail), on considère que la source est
++# AGRANDIE : `average` de GDAL se comporte alors comme `nearest` (blocs constants, terrasses).
++UPSAMPLE_RATIO = 1.05
++
++
++def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8):
++    """Taille du pixel de la source, en mètres dans le CRS cible, au voisinage de (cx, cy) ; la plus
++    fine parmi au plus ``max_files`` fichiers de la liste ; sur chaque fichier, l'axe le plus grossier
++    (un pixel en degrés est plus étroit en x qu'en y). None si elle ne peut pas être déterminée
++    (l'appelant retombe alors sur `average`, comportement historique)."""
++    paths = list(input_path) if isinstance(input_path, (list, tuple)) else [input_path]
++    if len(paths) > max_files:
++        step = len(paths) / max_files
++        paths = [paths[int(i * step)] for i in range(max_files)]
++    dst = osr.SpatialReference()
++    dst.ImportFromWkt(dst_srs_wkt)
++    dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
++    best = None
++    for path in paths:
++        try:
++            ds = gdal.Open(path)
++            gt, wkt = ds.GetGeoTransform(), ds.GetProjection()
++            if not wkt:
++                continue
++            src = osr.SpatialReference()
++            src.ImportFromWkt(wkt)
++            src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
++            fwd = osr.CoordinateTransformation(dst, src)
++            inv = osr.CoordinateTransformation(src, dst)
++            sx, sy, _ = fwd.TransformPoint(cx, cy)
++            x0, y0, _ = inv.TransformPoint(sx, sy)
++            xx, xy, _ = inv.TransformPoint(sx + gt[1], sy + gt[4])   # un pixel vers la droite
++            yx, yy, _ = inv.TransformPoint(sx + gt[2], sy + gt[5])   # un pixel vers le bas
++            size = max(math.hypot(xx - x0, xy - y0), math.hypot(yx - x0, yy - y0))
++        except (RuntimeError, ValueError, TypeError):
++            continue
++        if size > 0 and math.isfinite(size):
++            best = size if best is None else min(best, size)
++    return best
++
++
++def choose_resample_alg(mode, src_pixel_m, pixel_size_m):
++    """Algorithme de gdal.Warp. ``auto`` : `average` quand la grille de travail est plus grossière que
++    la source (réduction : moyenne = anticrénelage), `bilinear` quand elle est plus fine (agrandissement :
++    `average` donnerait des paliers plats, voir README). Sans connaître le pixel source : `average`."""
++    if mode != "auto":
++        return mode
++    if src_pixel_m is not None and src_pixel_m > UPSAMPLE_RATIO * pixel_size_m:
++        return "bilinear"
++    return "average"
++
++
+ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
+-                inside_fn=None):
++                inside_fn=None, resample="auto"):
+     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
+     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
+     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
+@@ -201,7 +255,11 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
+     Si input_path porte un attribut `fill_loader` (voir sources.with_copernicus_fill),
+     les trous du disque sont comblés par cette source secondaire, recalée en altitude.
+     fill=False : valeurs brutes, sans comblement ni complément (compare_dems).
+-    inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone)."""
++    inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone).
++    resample : "auto" (défaut), "average", "bilinear", "cubic" ou "cubicspline". En "auto", un DEM plus
++    grossier que la grille de travail est interpolé (bilinear) au lieu d'être répliqué par blocs."""
++    if resample not in RESAMPLE_CHOICES:
++        raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
+     ds = gdal.Open(_primary(input_path))
+     nodata = ds.GetRasterBand(1).GetNoDataValue()
+     loader = getattr(input_path, "fill_loader", None) if fill else None
+@@ -211,12 +269,19 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
+     xmin, xmax = cx - radius, cx + radius
+     ymin, ymax = cy - radius, cy + radius
+ 
++    src_px = source_pixel_size_m(input_path, dst_srs_wkt, cx, cy) if resample == "auto" else None
++    alg = choose_resample_alg(resample, src_px, pixel_size_m)
++    if alg != "average":
++        why = (f"pixel de la source ≈ {src_px:.1f} m > pixel de travail {pixel_size_m:.2f} m : "
++               "la source est agrandie" if resample == "auto" else "demandé par --resample")
++        log(f"ré-échantillonnage {alg} ({why})")
++
+     warped = gdal.Warp(
+         "", input_path, format="MEM",
+         dstSRS=dst_srs_wkt,
+         outputBounds=(xmin, ymin, xmax, ymax),
+         xRes=pixel_size_m, yRes=pixel_size_m,
+-        resampleAlg="average",
++        resampleAlg=alg,
+         dstNodata=nodata,
+         callback=progress_cb or gdal.TermProgress_nocb,
+     )
+diff --git a/sources.py b/sources.py
+index 745c6ce..c644dd1 100644
+--- a/sources.py
++++ b/sources.py
+@@ -24,6 +24,7 @@ proche plutôt que de télécharger du 1 m inutile.
+   - IGN : WMS-R Géoplateforme (annexe officielle lue), couche LiDAR HD brute
+     non confirmée sur serveur ; repli RGE ALTI.
+ """
++import http.client
+ import json
+ import math
+ import os
+@@ -84,7 +85,9 @@ def _http_get(url, timeout=None, retries=None):
+             last = f"{e}{' — ' + body if body else ''}"
+             if e.code not in (429, 500, 502, 503, 504):
+                 break
+-        except OSError as e:  # URLError, timeout, connexion coupée
++        except (OSError, http.client.HTTPException) as e:
++            # URLError, timeout, connexion coupée ; IncompleteRead (réponse tronquée) dérive de
++            # HTTPException, pas d'OSError : sans cela elle sortait brute et sans nouvelle tentative.
+             last = e
+         if attempt < retries - 1:
+             time.sleep(min(2 ** attempt, 8))
+@@ -103,13 +106,45 @@ def _http_json(url, params=None):
+         raise SourceUnavailable(f"{url} : réponse JSON invalide ({e})")
+ 
+ 
+-def _download(url, dest):
+-    """Télécharge vers dest (écriture atomique) sauf si déjà en cache."""
++PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
++
++
++def _is_tiff(head):
++    """True si les premiers octets sont ceux d'un TIFF (classique ou BigTIFF)."""
++    return head[:4] in TIFF_MAGICS
++
++
++def _is_png(head):
++    return head[:8] == PNG_MAGIC
++
++
++def _file_head(path, n=16):
++    try:
++        with open(path, "rb") as f:
++            return f.read(n)
++    except OSError:
++        return b""
++
++
++def _snippet(data, n=120):
++    return data[:n].decode("utf-8", "replace").replace("\n", " ").strip()
++
++
++def _download(url, dest, validate=None):
++    """Télécharge vers dest (écriture atomique) sauf si déjà en cache.
++
++    ``validate(octets_de_tête) -> bool`` contrôle le contenu : une réponse HTTP 200 qui contient en
++    réalité un message d'erreur (XML, HTML) n'est ni écrite dans le cache, ni réutilisée si elle y
++    figure déjà d'une exécution précédente (le fichier invalide est alors retéléchargé)."""
+     if os.path.exists(dest):
+-        return dest
++        if validate is None or validate(_file_head(dest)):
++            return dest
++        os.remove(dest)  # entrée de cache invalide (réponse d'erreur enregistrée autrefois) : on refait
+     data = _http_get(url)
+     if data is None:
+         raise SourceUnavailable(f"{url} : HTTP 404")
++    if validate is not None and not validate(data[:16]):
++        raise SourceUnavailable(f"{url} : réponse inattendue (contenu invalide) — {_snippet(data)}")
+     os.makedirs(os.path.dirname(dest), exist_ok=True)
+     tmp = dest + ".part"
+     with open(tmp, "wb") as f:
+@@ -198,7 +233,7 @@ def fetch_swisstopo(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
+     for u in urls:
+         dest = os.path.join(cache_dir, "swisstopo", os.path.basename(urllib.parse.urlparse(u).path))
+         log(f"  {os.path.basename(dest)} : {'en cache' if os.path.exists(dest) else 'téléchargement...'}")
+-        out.append(_download(u, dest))
++        out.append(_download(u, dest, validate=_is_tiff))
+     return out
+ 
+ 
+@@ -622,13 +657,19 @@ def _gsi_tile(z, x, y, cache_dir):
+         if z > zmax:
+             continue
+         path = os.path.join(cache_dir, "gsi", layer, str(z), f"{x}_{y}.png")
++        data = None
+         if os.path.exists(path):
+             with open(path, "rb") as f:
+                 data = f.read()
+-        else:
++            if not _is_png(data):
++                os.remove(path)  # cache invalide (réponse d'erreur enregistrée autrefois) : on refait
++                data = None
++        if data is None:
+             data = _http_get(GSI_URL.format(layer=layer, z=z, x=x, y=y))
+             if data is None:
+                 continue
++            if not _is_png(data):
++                raise SourceUnavailable(f"GSI : tuile {layer}/{z}/{x}/{y} : réponse inattendue — {_snippet(data)}")
+             os.makedirs(os.path.dirname(path), exist_ok=True)
+             with open(path + ".part", "wb") as f:
+                 f.write(data)
+@@ -636,6 +677,8 @@ def _gsi_tile(z, x, y, cache_dir):
+         try:
+             return decode_gsi_rgb(_read_png_rgb(data)), layer
+         except RuntimeError:
++            if os.path.exists(path):
++                os.remove(path)  # ne pas garder en cache une tuile illisible
+             raise SourceUnavailable(f"GSI : tuile {layer}/{z}/{x}/{y} illisible")
+     return None, None
+ 
+diff --git a/tests/test_bottom_merged.py b/tests/test_bottom_merged.py
+new file mode 100644
+index 0000000..fe29241
+--- /dev/null
++++ b/tests/test_bottom_merged.py
+@@ -0,0 +1,221 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Fond fusionné (--bottom merged / merged-rows, prototype) : mêmes propriétés que le fond cellule par cellule.
++
++Les propriétés vérifiées ne dépendent pas du code de maillage : étanchéité sans jonction en T, orientation,
++volume exact calculé à part, et identité de la géométrie avec le fond « grid »."""
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import bottom as bottom_mod  # noqa: E402
++import check_stl  # noqa: E402
++import circle_dem_to_stl  # noqa: E402
++import mesh_export  # noqa: E402
++from test_mesh_properties import BASE, SCALE, assert_solid, blob, build, make_tifs  # noqa: E402
++
++MERGED_MODES = ["merged", "merged-rows"]
++
++
++def _cells(rects, shape):
++    out = np.zeros(shape, int)
++    for i0, i1, j0, j1 in rects:
++        out[i0:i1 + 1, j0:j1 + 1] += 1
++    return out
++
++
++def _disc(n, radius):
++    yy, xx = np.mgrid[0:n, 0:n]
++    c = (n - 1) / 2.0
++    return (xx - c) ** 2 + (yy - c) ** 2 <= radius ** 2
++
++
++def _aspects(t):
++    e = np.stack([np.linalg.norm(t[:, 1] - t[:, 0], axis=1), np.linalg.norm(t[:, 2] - t[:, 1], axis=1),
++                  np.linalg.norm(t[:, 0] - t[:, 2], axis=1)])
++    area = np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1) / 2
++    return e.max(axis=0) ** 2 / (2 * area)            # 1,15 : équilatéral ; 2 : demi-carré ; grand : aiguille
++
++
++# --- couverture par rectangles gloutons (merged-rows) -----------------------------------------------
++
++@pytest.mark.parametrize("seed", range(10))
++@pytest.mark.parametrize("cap", [None, 1, 3, 16])
++def test_rectangles_cover_the_mask_exactly_without_overlap_and_respect_the_cap(seed, cap):
++    q = blob(seed, n=40, keep=0.35 + 0.05 * (seed % 6))
++    rects = bottom_mod.cover_with_rectangles(q, cap)
++    cover = _cells(rects, q.shape)
++    assert cover.max() <= 1 and (cover == 1).tolist() == q.tolist()
++    if cap is not None:
++        assert all(i1 - i0 + 1 <= cap and j1 - j0 + 1 <= cap for i0, i1, j0, j1 in rects)
++
++
++def test_cover_rejects_invalid_cap_and_handles_empty_mask():
++    with pytest.raises(ValueError):
++        bottom_mod.cover_with_rectangles(np.ones((3, 3), bool), 0)
++    xs = np.arange(5.0)
++    assert bottom_mod.cover_with_rectangles(np.zeros((4, 4), bool)) == []
++    assert bottom_mod.cover_with_graded_squares(np.zeros((4, 4), bool)) == []
++    for cover in bottom_mod.COVERS:
++        assert bottom_mod.merged_bottom_triangles(np.zeros((4, 4), bool), xs, xs, -1.0, cover=cover).shape == (0, 3, 3)
++    with pytest.raises(ValueError, match="cover"):
++        bottom_mod.merged_bottom_triangles(np.ones((2, 2), bool), np.arange(3.0), np.arange(3.0), 0.0, cover="x")
++
++
++def test_full_rectangle_is_a_single_rectangle_for_rows_cover():
++    q = np.ones((12, 20), bool)
++    assert bottom_mod.cover_with_rectangles(q) == [(0, 11, 0, 19)]
++    xs, ys = np.arange(21.0), -np.arange(13.0)
++    t = bottom_mod.merged_bottom_triangles(q, xs, ys, -2.0, cover="rows")
++    assert len(t) == 2 * (12 + 20)          # contour : tous les nœuds du bord (parois), éventail de 64 triangles
++
++
++# --- couverture par carrés équilibrés (merged) ------------------------------------------------------
++
++@pytest.mark.parametrize("seed", range(10))
++def test_graded_squares_cover_exactly_are_aligned_powers_of_two_and_balanced(seed):
++    q = blob(seed, n=44, keep=0.35 + 0.05 * (seed % 6))
++    rects = bottom_mod.cover_with_graded_squares(q)
++    cover = _cells(rects, q.shape)
++    assert cover.max() <= 1 and (cover == 1).tolist() == q.tolist()
++    size = np.zeros(q.shape, int)
++    for i0, i1, j0, j1 in rects:
++        s = i1 - i0 + 1
++        assert s == j1 - j0 + 1 and s & (s - 1) == 0 and i0 % s == 0 and j0 % s == 0      # carré 2^k aligné
++        size[i0:i1 + 1, j0:j1 + 1] = s
++    for a, b in ((size[:-1, :], size[1:, :]), (size[:, :-1], size[:, 1:])):                # voisins par un côté
++        both = (a > 0) & (b > 0)
++        if both.any():
++            assert (np.maximum(a, b)[both] / np.minimum(a, b)[both]).max() <= 2.0
++
++
++def test_graded_cover_of_a_full_square_is_a_single_leaf_and_boundary_cells_stay_unit_squares():
++    full = np.ones((16, 16), bool)
++    assert bottom_mod.cover_with_graded_squares(full) == [(0, 15, 0, 15)]
++    q = np.zeros((16, 16), bool); q[1:15, 1:15] = True
++    sizes = {i1 - i0 + 1 for i0, i1, _, _ in bottom_mod.cover_with_graded_squares(q)}
++    assert 1 in sizes and max(sizes) >= 4
++
++
++# --- solide fermé, orienté, de volume exact ---------------------------------------------------------
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++@pytest.mark.parametrize("seed", range(14))
++def test_random_blobs_with_merged_bottom_are_closed_oriented_solids_of_exact_volume(bottom, seed):
++    mask = blob(seed, keep=0.4 + 0.03 * (seed % 6))
++    vexag = 1.0 + seed % 3
++    cap = 4 if bottom == "merged-rows" and seed % 2 else None
++    tris, elev, quad_ok, xs, ys, min_e, _ = build(mask, vexag=vexag, seed=seed, bottom=bottom, bottom_max_cells=cap)
++    assert_solid(tris, elev, quad_ok, xs, ys, min_e, vexag=vexag)
++
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++def test_special_masks_with_merged_bottom(bottom):
++    n = 30
++    rect = np.zeros((n, n), bool); rect[4:26, 3:27] = True
++    ring = np.zeros((n, n), bool); ring[3:27, 3:27] = True; ring[10:20, 10:20] = False
++    islands = np.zeros((n, n), bool); islands[3:12, 3:12] = True; islands[17:27, 16:27] = True
++    pinch = np.zeros((n, n), bool); pinch[5:15, 5:15] = True; pinch[15:25, 15:25] = True
++    for mask in (rect, ring, islands, pinch):
++        tris, elev, quad_ok, xs, ys, min_e, _ = build(mask, bottom=bottom)
++        assert_solid(tris, elev, quad_ok, xs, ys, min_e)
++
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++@pytest.mark.parametrize("seed", range(6))
++def test_merged_and_grid_bottoms_have_the_same_geometry(bottom, seed):
++    mask = blob(seed, keep=0.5)
++    g, *_rest, (gt, gb, gw) = build(mask, seed=seed)
++    m, *_rest2, (mt, mb, mw) = build(mask, seed=seed, bottom=bottom)
++    assert gt == mt and gw == mw                                              # dessus et parois identiques
++    assert np.array_equal(g[:gt], m[:mt]) and np.array_equal(g[gt + gb:], m[mt + mb:])
++    gv, gf = mesh_export.index_mesh(g)
++    mv, mf = mesh_export.index_mesh(m)
++    assert mesh_export.signed_volume(mv, mf) == pytest.approx(mesh_export.signed_volume(gv, gf), rel=1e-12)
++    assert mb < gb                                                            # moins de triangles au fond
++
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++def test_merged_bottom_triangles_face_down_have_no_degenerate_and_lie_on_the_base_plane(bottom):
++    mask = blob(3, keep=0.55)
++    tris, *_rest, (nt, nb, nw) = build(mask, bottom=bottom)
++    b = tris[nt:nt + nb]
++    assert np.all(b[:, :, 2] == -BASE)
++    cross = np.cross(b[:, 1] - b[:, 0], b[:, 2] - b[:, 0])
++    assert np.all(cross[:, 2] < 0)                                             # normales vers -z
++    assert check_stl.degenerate_count(b) == 0
++
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++@pytest.mark.parametrize("n,radius", [(40, 18.0), (61, 29.0), (100, 45.3)])
++def test_merged_bottom_with_smooth_wall_is_closed_oriented_and_same_volume_as_grid(bottom, n, radius):
++    mask = _disc(n, radius)
++    kw = dict(smooth_wall=True, circle_radius_mm=radius * SCALE)
++    g, *_ = build(mask, **kw)
++    m, *_rest, (nt, nb, nw) = build(mask, bottom=bottom, **kw)
++    rep = check_stl.edge_report(m)
++    assert rep["boundary_edges"] == 0 and rep["nonmanifold_edges"] == 0 and rep["duplicate_directed_edges"] == 0
++    gv, gf = mesh_export.index_mesh(g)
++    mv, mf = mesh_export.index_mesh(m)
++    assert mesh_export.signed_volume(mv, mf) == pytest.approx(mesh_export.signed_volume(gv, gf), rel=1e-12)
++    assert len(m) < (0.7 if n >= 60 else 1.0) * len(g)
++
++
++# --- réduction et qualité des triangles sur un disque réaliste ---------------------------------------
++
++def test_a_realistic_disc_loses_almost_the_whole_bottom_with_compact_triangles():
++    mask = _disc(400, 190.0)                                                   # disque de 380 cellules de diamètre
++    *_a, (gt, gb, gw) = build(mask)
++    tg, *_b, (mt, mb, mw) = build(mask, bottom="merged")
++    tr, *_c, (rt, rb, rw) = build(mask, bottom="merged-rows")
++    assert mb < 0.05 * gb and rb < 0.02 * gb                                  # fond : -96 % (quadtree), -99 % (rectangles)
++    assert (mt + mb + mw) < 0.55 * (gt + gb + gw)                              # total : environ -50 %
++    assert _aspects(tg[mt:mt + mb]).max() <= 4.0 + 1e-9                        # quadtree : triangles compacts
++    assert _aspects(tr[rt:rt + rb]).max() > 1000.0                             # rectangles gloutons : aiguilles (constat)
++
++
++def test_rows_cap_trades_triangles_for_less_elongated_ones():
++    mask = np.ones((60, 200), bool)
++    xs, ys = np.arange(201.0), -np.arange(61.0)
++    free = bottom_mod.merged_bottom_triangles(mask, xs, ys, 0.0, cover="rows")
++    capped = bottom_mod.merged_bottom_triangles(mask, xs, ys, 0.0, max_cells=10, cover="rows")
++    assert len(capped) > len(free) and _aspects(capped).max() < _aspects(free).max()
++
++
++def test_unknown_bottom_mode_is_refused():
++    with pytest.raises(ValueError, match="bottom"):
++        build(blob(1), bottom="coarse")
++
++
++# --- de bout en bout (CLI, trois formats) ----------------------------------------------------------
++
++def _run(monkeypatch, tmp_path, capsys, out, *extra):
++    a, _ = make_tifs(tmp_path)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(sys, "argv", ["x", "--input", a, "--cx", "2601000", "--cy", "1201000", "--radius", "800",
++                                      "--diameter-mm", "60", "--vexag", "1", "--base-mm", "2",
++                                      "--print-spacing-mm", "0.5", "--output", str(out), *extra])
++    circle_dem_to_stl.main()
++    capsys.readouterr()
++    return mesh_export.read_triangles(str(out))
++
++
++@pytest.mark.parametrize("bottom", MERGED_MODES)
++@pytest.mark.parametrize("ext", ["stl", "3mf", "obj"])
++def test_cli_bottom_merged_produces_a_valid_file_in_all_formats(monkeypatch, tmp_path, capsys, bottom, ext):
++    grid = _run(monkeypatch, tmp_path, capsys, tmp_path / f"g.{ext}")
++    merged = _run(monkeypatch, tmp_path, capsys, tmp_path / f"m.{ext}", "--bottom", bottom)
++    assert len(merged) < 0.65 * len(grid)
++    res = {n: ok for n, ok, _ in check_stl.check(merged, 60.0, 2.0, tol_mm=1.0)}
++    assert all(res.values()), res
++    gv, gf = mesh_export.index_mesh(grid)
++    mv, mf = mesh_export.index_mesh(merged)
++    assert mesh_export.signed_volume(mv, mf) == pytest.approx(mesh_export.signed_volume(gv, gf), rel=1e-4)
++
++
++def test_cli_default_is_still_the_grid_bottom(monkeypatch, tmp_path, capsys):
++    default = _run(monkeypatch, tmp_path, capsys, tmp_path / "d.stl")
++    explicit = _run(monkeypatch, tmp_path, capsys, tmp_path / "e.stl", "--bottom", "grid")
++    assert np.array_equal(default, explicit)
+diff --git a/tests/test_diagonal_pinch.py b/tests/test_diagonal_pinch.py
+index 39d63a2..58f73f7 100644
+--- a/tests/test_diagonal_pinch.py
++++ b/tests/test_diagonal_pinch.py
+@@ -57,3 +57,28 @@ def test_erode_then_dilate_removes_single_pixel_protrusion():
+     opened = dilate3x3(erode3x3(mask))
+     assert not opened[1, 3], "la languette d'un seul pixel aurait dû être supprimée"
+     assert opened[2:5, 2:5].all(), "le bloc plein ne doit pas être entamé"
++
++
++def _count_pinches(q):
++    d1 = q[:-1, :-1] & q[1:, 1:] & ~q[:-1, 1:] & ~q[1:, :-1]
++    d2 = q[:-1, 1:] & q[1:, :-1] & ~q[:-1, :-1] & ~q[1:, 1:]
++    return int(d1.sum() + d2.sum())
++
++
++def test_fix_runs_until_stable_not_a_fixed_number_of_passes():
++    # Masque aléatoire (16x16, graine 87) où l'ancien plafond de 4 passes
++    # laissait un pincement : le comblement d'un pincement peut en créer un voisin.
++    q = np.random.default_rng(87).random((16, 16)) < 0.3
++    assert _count_pinches(fix_diagonal_pinches(q.copy(), max_iterations=4)) > 0
++    assert _count_pinches(fix_diagonal_pinches(q.copy())) == 0
++
++
++def test_fix_leaves_no_pinch_on_random_masks_and_only_adds_cells():
++    for density in (0.3, 0.5, 0.7):
++        for seed in range(25):
++            q = np.random.default_rng(seed).random((30, 30)) < density
++            before = q.copy()
++            out = fix_diagonal_pinches(q)
++            assert _count_pinches(out) == 0
++            assert (out | before).sum() == out.sum()      # monotone : on n'enlève jamais de matière
++            assert (fix_diagonal_pinches(out.copy()) == out).all()   # idempotent
+diff --git a/tests/test_download_integrity.py b/tests/test_download_integrity.py
+new file mode 100644
+index 0000000..c5354bb
+--- /dev/null
++++ b/tests/test_download_integrity.py
+@@ -0,0 +1,169 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Intégrité des téléchargements : réponse tronquée, page d'erreur reçue en HTTP 200, cache invalide.
++
++Les tests utilisent un vrai serveur HTTP local (127.0.0.1), pas de simulation de la bibliothèque :
++c'est le comportement réel de urllib et http.client face à une connexion coupée qui est vérifié."""
++import http.server
++import os
++import socketserver
++import sys
++import threading
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import download  # noqa: E402
++import sources  # noqa: E402
++from conftest import write_synthetic_tif  # noqa: E402
++
++XML_ERROR = b'<?xml version="1.0"?><ServiceExceptionReport>serveur surcharge</ServiceExceptionReport>'
++PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
++
++
++@pytest.fixture
++def server():
++    """Serveur local dont le comportement est piloté par `state` : liste de réponses à servir dans
++    l'ordre ('ok', 'truncated', 'xml200'), la dernière étant répétée. `state['hits']` compte les requêtes."""
++    state = {"script": ["ok"], "hits": 0, "payload": b"II*\x00" + bytes(range(256)) * 40}
++
++    class Handler(http.server.BaseHTTPRequestHandler):
++        protocol_version = "HTTP/1.1"
++
++        def log_message(self, *a):
++            pass
++
++        def do_GET(self):
++            i = min(state["hits"], len(state["script"]) - 1)
++            mode = state["script"][i]
++            state["hits"] += 1
++            payload = state["payload"]
++            if mode == "truncated":
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(payload)))
++                self.end_headers()
++                self.wfile.write(payload[: len(payload) // 2])
++                self.wfile.flush()
++                self.close_connection = True
++            elif mode == "xml200":
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(XML_ERROR)))
++                self.end_headers()
++                self.wfile.write(XML_ERROR)
++            else:
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(payload)))
++                self.end_headers()
++                self.wfile.write(payload)
++
++    srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    state["url"] = f"http://127.0.0.1:{srv.server_address[1]}/tile"
++    yield state
++    srv.shutdown()
++    srv.server_close()
++
++
++@pytest.fixture(autouse=True)
++def no_sleep(monkeypatch):
++    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
++
++
++def test_http_get_retries_a_truncated_response_then_succeeds(server):
++    server["script"] = ["truncated", "ok"]
++    data = sources._http_get(server["url"])
++    assert data == server["payload"] and server["hits"] == 2
++
++
++def test_http_get_persistent_truncation_is_source_unavailable_not_a_raw_exception(server):
++    server["script"] = ["truncated"]
++    with pytest.raises(sources.SourceUnavailable):
++        sources._http_get(server["url"])
++    assert server["hits"] == sources.HTTP_RETRIES
++
++
++def test_download_rejects_http_200_error_page_and_does_not_cache_it(server, tmp_path):
++    server["script"] = ["xml200"]
++    dest = str(tmp_path / "c" / "tile.tif")
++    with pytest.raises(sources.SourceUnavailable) as e:
++        sources._download(server["url"], dest, validate=sources._is_tiff)
++    assert "ServiceExceptionReport" in str(e.value)       # le début de la réponse aide au diagnostic
++    assert not os.path.exists(dest) and not os.path.exists(dest + ".part")
++
++
++def test_download_discards_an_invalid_cached_file_and_downloads_again(server, tmp_path):
++    dest = tmp_path / "c" / "tile.tif"
++    dest.parent.mkdir()
++    dest.write_bytes(XML_ERROR)                            # cache empoisonné par une exécution antérieure
++    out = sources._download(server["url"], str(dest), validate=sources._is_tiff)
++    assert out == str(dest) and dest.read_bytes() == server["payload"] and server["hits"] == 1
++
++
++def test_download_keeps_a_valid_cached_file_without_network(server, tmp_path):
++    dest = tmp_path / "tile.tif"
++    dest.write_bytes(server["payload"])
++    sources._download(server["url"], str(dest), validate=sources._is_tiff)
++    assert server["hits"] == 0
++
++
++def test_download_without_validation_keeps_previous_behaviour(server, tmp_path):
++    server["script"] = ["xml200"]
++    dest = tmp_path / "x.json"
++    assert sources._download(server["url"], str(dest)) == str(dest) and dest.read_bytes() == XML_ERROR
++
++
++def test_gsi_tile_rejects_non_png_and_does_not_cache(tmp_path, monkeypatch):
++    monkeypatch.setattr(sources, "_http_get", lambda *a, **k: XML_ERROR)
++    with pytest.raises(sources.SourceUnavailable):
++        sources._gsi_tile(14, 100, 50, str(tmp_path))
++    assert not list(tmp_path.rglob("*.png*"))
++
++
++def test_gsi_tile_discards_invalid_cached_png_and_downloads_again(tmp_path, monkeypatch):
++    good = None
++    from test_sources import make_png
++    good = make_png(np.full((256, 256), 100.0))
++    cached = tmp_path / "gsi" / "dem1a_png" / "17" / "100_50.png"
++    cached.parent.mkdir(parents=True)
++    cached.write_bytes(XML_ERROR)
++    monkeypatch.setattr(sources, "_http_get", lambda *a, **k: good)
++    h, layer = sources._gsi_tile(17, 100, 50, str(tmp_path))
++    assert layer == "dem1a_png" and h.shape == (256, 256) and cached.read_bytes() == good
++
++
++def test_gsi_tile_unreadable_png_is_removed_from_cache(tmp_path, monkeypatch):
++    bad = PNG                                              # signature PNG valide, contenu illisible
++    monkeypatch.setattr(sources, "_http_get", lambda *a, **k: bad)
++    with pytest.raises(sources.SourceUnavailable):
++        sources._gsi_tile(17, 100, 50, str(tmp_path))
++    assert not list(tmp_path.rglob("100_50.png"))
++
++
++def test_copernicus_truncated_download_is_not_cached(server, tmp_path, monkeypatch):
++    server["script"] = ["truncated"]
++    monkeypatch.setattr(download, "tile_url", lambda *a, **k: server["url"])
++    with pytest.raises(RuntimeError, match="incomplet"):
++        download.download_copernicus(35.36, 138.73, 500, str(tmp_path / "cache"), log=lambda *_: None)
++    assert not list((tmp_path / "cache").glob("*.tif"))   # avant correctif : un .tif tronqué y restait
++
++
++def test_copernicus_error_page_is_not_cached(server, tmp_path, monkeypatch):
++    server["script"] = ["xml200"]
++    monkeypatch.setattr(download, "tile_url", lambda *a, **k: server["url"])
++    with pytest.raises(RuntimeError):
++        download.download_copernicus(35.36, 138.73, 500, str(tmp_path / "cache"), log=lambda *_: None)
++    assert not list((tmp_path / "cache").glob("*.tif"))
++
++
++def test_copernicus_invalid_cached_tile_is_downloaded_again(server, tmp_path, monkeypatch):
++    cache = tmp_path / "cache"
++    cache.mkdir()
++    name = download.tile_name(35, 138)
++    (cache / f"{name}.tif").write_bytes(XML_ERROR)
++    good = tmp_path / "good.tif"
++    write_synthetic_tif(good, np.full((10, 10), 100.0), 138.0, 36.0, 0.1, 4326)
++    server["payload"] = good.read_bytes()
++    monkeypatch.setattr(download, "tile_url", lambda *a, **k: server["url"])
++    paths = download.download_copernicus(35.36, 138.73, 500, str(cache), log=lambda *_: None)
++    assert (cache / f"{name}.tif").read_bytes() == server["payload"] and server["hits"] == 1 and len(paths) == 1
+diff --git a/tests/test_mesh_properties.py b/tests/test_mesh_properties.py
+index ce0c3a2..dbe025f 100644
+--- a/tests/test_mesh_properties.py
++++ b/tests/test_mesh_properties.py
+@@ -200,3 +200,32 @@ def test_check_stl_cli_exit_codes(monkeypatch, tmp_path, capsys):
+     with pytest.raises(SystemExit) as e:
+         check_stl.main()
+     assert "extension non gérée" in str(e.value)
++
++
++def _check_results(tris):
++    ext = tris.reshape(-1, 3).max(axis=0) - tris.reshape(-1, 3).min(axis=0)
++    return {n: (ok, d) for n, ok, d in check_stl.check(tris, float(max(ext[0], ext[1])), BASE, tol_mm=1.0)}
++
++
++def test_check_stl_reports_positive_volume_and_no_degenerate_on_valid_solid():
++    tris, elev, quad_ok, xs, ys, min_e, _ = build(blob(3))
++    res = _check_results(tris)
++    assert res["orientation (volume signé)"][0] and res["triangles dégénérés"] == (True, "0 triangle(s) d'aire nulle")
++    assert check_stl.signed_volume(tris) == pytest.approx(expected_volume(elev, quad_ok, xs, ys, min_e, 1.0), rel=1e-4)
++
++
++def test_check_stl_detects_a_globally_flipped_solid_that_the_edge_test_accepts():
++    tris, *_ = build(blob(3))
++    flipped = tris[:, ::-1, :].copy()          # toutes les faces retournées : cohérent arête par arête
++    res = _check_results(flipped)
++    assert res["étanchéité"][0] is True        # l'ancien contrôle ne voyait rien
++    assert res["orientation (volume signé)"][0] is False and "NÉGATIF" in res["orientation (volume signé)"][1]
++
++
++def test_check_stl_counts_degenerate_triangles():
++    tris, *_ = build(blob(3))
++    a = tris[0]
++    step = np.array([1.0, 0.0, 0.0])
++    extra = np.array([[a[0], a[0], a[1]], [a[0], a[0] + step, a[0] + 2 * step]])   # sommet doublé ; trois points alignés
++    assert check_stl.degenerate_count(tris) == 0
++    assert check_stl.degenerate_count(np.concatenate([tris, extra])) == 2
+diff --git a/tests/test_resample.py b/tests/test_resample.py
+new file mode 100644
+index 0000000..930daba
+--- /dev/null
++++ b/tests/test_resample.py
+@@ -0,0 +1,154 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Choix du rééchantillonnage selon le sens : réduction (average) ou agrandissement (bilinear).
++
++Défaut corrigé : `average` de GDAL, quand le pixel de travail est plus petit que celui de la source, se
++comporte comme `nearest` (blocs constants, donc terrasses et pente nulle sur la plupart des cellules)."""
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++from osgeo import osr
++from scipy import ndimage
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import circle_dem_to_stl  # noqa: E402
++import raster  # noqa: E402
++from conftest import write_synthetic_tif  # noqa: E402
++
++
++def wkt(epsg):
++    s = osr.SpatialReference()
++    s.ImportFromEPSG(epsg)
++    return s.ExportToWkt()
++
++
++def rough_dem(n, seed=1, amp=60.0):
++    return 500.0 + ndimage.gaussian_filter(np.random.default_rng(seed).normal(size=(n, n)), 2.0) * amp
++
++
++def flat_fraction(a):
++    gy, gx = np.gradient(a)
++    return float(np.mean((gx == 0) & (gy == 0)))
++
++
++# --- taille du pixel de la source ------------------------------------------------------------------
++
++def test_source_pixel_size_projected_raster(tmp_path):
++    p = tmp_path / "s.tif"
++    write_synthetic_tif(p, rough_dem(20), 600000.0, 5100000.0, 30.0, 32631)
++    assert raster.source_pixel_size_m(str(p), wkt(32631), 600300.0, 5099700.0) == pytest.approx(30.0, rel=1e-3)
++
++
++def test_source_pixel_size_geographic_raster_uses_the_coarser_axis(tmp_path):
++    p = tmp_path / "g.tif"
++    write_synthetic_tif(p, rough_dem(20), 6.0, 46.5, 0.001, 4326)       # 0,001° : ~111 m en y, ~77 m en x à 46°N
++    x, y = 6.01, 46.49
++    ct = osr.CoordinateTransformation(_srs(4326), _srs(32632))
++    cx, cy, _ = ct.TransformPoint(x, y)
++    size = raster.source_pixel_size_m(str(p), wkt(32632), cx, cy)
++    assert size == pytest.approx(111.2, rel=0.02)
++
++
++def _srs(epsg):
++    s = osr.SpatialReference()
++    s.ImportFromEPSG(epsg)
++    s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
++    return s
++
++
++def test_source_pixel_size_web_mercator_is_ground_size_not_projected_size(tmp_path):
++    p = tmp_path / "wm.tif"
++    write_synthetic_tif(p, rough_dem(20), 667000.0, 8400000.0, 100.0, 3857)     # ~ latitude 60°N
++    ct = osr.CoordinateTransformation(_srs(3857), _srs(32635))
++    cx, cy, _ = ct.TransformPoint(667500.0, 8399500.0)
++    size = raster.source_pixel_size_m(str(p), wkt(32635), cx, cy)
++    assert 45.0 < size < 55.0           # ~ 100 m x cos(60°), pas 100 m
++
++
++def test_source_pixel_size_takes_the_finest_of_a_list(tmp_path):
++    a, b = tmp_path / "a.tif", tmp_path / "b.tif"
++    write_synthetic_tif(a, rough_dem(20), 600000.0, 5100000.0, 30.0, 32631)
++    write_synthetic_tif(b, rough_dem(20), 600600.0, 5100000.0, 5.0, 32631)
++    assert raster.source_pixel_size_m([str(a), str(b)], wkt(32631), 600300.0, 5099800.0) == pytest.approx(5.0, rel=1e-3)
++
++
++def test_source_pixel_size_unreadable_source_is_none(tmp_path):
++    p = tmp_path / "x.tif"
++    p.write_bytes(b"pas un raster")
++    assert raster.source_pixel_size_m(str(p), wkt(32631), 0.0, 0.0) is None
++
++
++# --- choix de l'algorithme -------------------------------------------------------------------------
++
++@pytest.mark.parametrize("src,px,expected", [
++    (30.0, 5.0, "bilinear"),      # agrandissement x6
++    (30.0, 28.0, "bilinear"),     # rapport 1,07 > 1,05
++    (30.0, 30.0, "average"),      # même résolution
++    (30.0, 29.0, "average"),      # rapport 1,03 : dans la tolérance
++    (1.0, 10.0, "average"),       # réduction
++    (None, 5.0, "average"),       # source inconnue : comportement historique
++])
++def test_auto_choice(src, px, expected):
++    assert raster.choose_resample_alg("auto", src, px) == expected
++
++
++@pytest.mark.parametrize("mode", ["average", "bilinear", "cubic", "cubicspline"])
++def test_explicit_choice_is_honoured(mode):
++    assert raster.choose_resample_alg(mode, 30.0, 5.0) == mode and raster.choose_resample_alg(mode, 1.0, 50.0) == mode
++
++
++# --- effet sur le terrain ---------------------------------------------------------------------------
++
++def _warp(path, **kw):
++    return raster.warp_window(str(path), wkt(32631), 600600.0, 5099400.0, 500.0, 5.0,
++                              progress_cb=lambda *a: 1, fill=False, **kw)[0]
++
++
++@pytest.fixture
++def coarse_dem(tmp_path):
++    p = tmp_path / "coarse.tif"
++    write_synthetic_tif(p, rough_dem(60), 600000.0, 5100000.0, 30.0, 32631)    # pixel de 30 m, grille de travail à 5 m
++    return p
++
++
++def test_auto_removes_the_terraces_that_average_creates_when_the_source_is_enlarged(coarse_dem):
++    avg = _warp(coarse_dem, resample="average")
++    auto = _warp(coarse_dem)                              # défaut = auto
++    assert flat_fraction(avg) > 0.4                       # `average` : blocs constants de 6x6 cellules
++    assert flat_fraction(auto) < 0.01                     # auto : surface continue
++    assert not np.array_equal(avg, auto)
++
++
++def test_auto_leaves_downsampling_unchanged(tmp_path):
++    p = tmp_path / "fine.tif"
++    write_synthetic_tif(p, rough_dem(400), 600000.0, 5100000.0, 2.0, 32631)    # pixel de 2 m, grille à 5 m : réduction
++    assert np.array_equal(_warp(p), _warp(p, resample="average"))
++
++
++def test_bilinear_never_overshoots_source_values(coarse_dem):
++    out = _warp(coarse_dem, resample="bilinear")
++    src_min, src_max = rough_dem(60).min(), rough_dem(60).max()
++    assert out.min() >= src_min - 1e-3 and out.max() <= src_max + 1e-3
++
++
++def test_unknown_resample_value_is_an_input_error(coarse_dem):
++    with pytest.raises(raster.InputError, match="--resample"):
++        _warp(coarse_dem, resample="lanczos")
++
++
++def test_build_mesh_logs_the_choice_only_when_not_average(coarse_dem, tmp_path, capsys):
++    kw = dict(lat=None, lon=None, cx=600600.0, cy=5099400.0, radius=500.0, diameter_mm=40.0, vexag=1.0, base_mm=2.0,
++              print_spacing_mm=0.8)                      # pixel de travail = 1000 m / 40 mm x 0,8 mm = 20 m < 30 m (source)
++    circle_dem_to_stl.build_mesh(str(coarse_dem), **kw)
++    assert "ré-échantillonnage bilinear" in capsys.readouterr().out
++    fine = tmp_path / "fine.tif"
++    write_synthetic_tif(fine, rough_dem(400), 600000.0, 5100000.0, 2.0, 32631)
++    circle_dem_to_stl.build_mesh(str(fine), **kw)
++    assert "ré-échantillonnage bilinear" not in capsys.readouterr().out
++
++
++def test_cli_exposes_the_option_with_auto_as_default():
++    assert "auto" in raster.RESAMPLE_CHOICES and raster.RESAMPLE_CHOICES[0] == "auto"
++    parser_help = open(Path(__file__).resolve().parent.parent / "circle_dem_to_stl.py", encoding="utf-8").read()
++    assert '"--resample"' in parser_help and 'default="auto"' in parser_help

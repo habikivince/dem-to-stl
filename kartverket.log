@@ -1,0 +1,26 @@
+[DEM2STL] source demandée : Kartverket Høydedata DTM1 (Norvège)
+[DEM2STL] Kartverket : extension Scaling indisponible (https://wms.geonorge.no/skwms1/wcs.hoyde-dtm-nhm-topobathy-25833?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEI)
+[DEM2STL] Kartverket : résolution native 1 m demandée par morceaux, puis ré-échantillonnée
+Traceback (most recent call last):
+  File "/home/vincent/Téléchargements/dem-to-stl/circle_dem_to_stl.py", line 220, in <module>
+    main()
+    ~~~~^^
+  File "/home/vincent/Téléchargements/dem-to-stl/circle_dem_to_stl.py", line 206, in main
+    used, args.input = sources.acquire(
+                       ~~~~~~~~~~~~~~~^
+        source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        copernicus_product=args.copernicus_product, log=raster.log)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vincent/Téléchargements/dem-to-stl/sources.py", line 596, in acquire
+    return source, SOURCES[source].fetch(lat, lon, radius_m, cache_dir, pixel_size_m, log)
+                   ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vincent/Téléchargements/dem-to-stl/sources.py", line 350, in fetch_kartverket
+    probe = wcs.get((pb[0] + 150, pb[1] + 150, pb[0] + 250, pb[1] + 250))
+  File "/home/vincent/Téléchargements/dem-to-stl/sources.py", line 268, in get
+    raise last or SourceUnavailable("Kartverket WCS : aucune réponse")
+  File "/home/vincent/Téléchargements/dem-to-stl/sources.py", line 258, in get
+    data = _http_get(url)
+  File "/home/vincent/Téléchargements/dem-to-stl/sources.py", line 85, in _http_get
+    raise SourceUnavailable(f"{url} : {last}")
+sources.SourceUnavailable: https://wms.geonorge.no/skwms1/wcs.hoyde-dtm-nhm-topobathy-25833?SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage&COVERAGEID=nhm_dtm_topobathy_25833&SUBSET=x%28-5442%2C-5342%29&SUBSET=y%286571876%2C6571976%29&FORMAT=image/tiff : HTTP Error 400: Bad Request

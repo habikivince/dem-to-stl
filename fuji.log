@@ -1,0 +1,17 @@
+[DEM2STL] Lieu « Mont Fuji » -> Mont Fuji, Oyama, District de Suntō, Préfecture de Shizuoka, Japon (natural/volcano) lat=35.36284 lon=138.73077 [résultat 1/1]
+[DEM2STL] Géocodage : données © OpenStreetMap contributors (ODbL), via Nominatim.
+[DEM2STL] auto : (35.3628, 138.7308) dans l'emprise de GSI tuiles d'élévation (Japon), essai
+[DEM2STL] GSI : zoom 14, 156 tuile(s) (pixel de travail 14.88 m)
+[DEM2STL] GSI : couches utilisées dem1a_png=156
+[DEM2STL] source utilisée : gsi
+[DEM2STL] CRS source Web Mercator (EPSG:3857, mètres non métriques) détecté -> reprojection à la volée vers UTM 54N (EPSG:32654)
+[DEM2STL] échelle : 0.013441 mm/m | résolution de ré-échantillonnage : 14.880 m/pixel
+0...10...20...30...40...50...60...70...80...90...100 - done.
+0...10...20...30...40...50...60...70...80...90...[DEM2STL] grille ré-échantillonnée : 1250 x 1250 points
+[DEM2STL] 1224685 cellules incluses dans le disque
+
+
+[DEM2STL] 2449370 triangles (dessus) + 2449370 (dessous) + 9992 (paroi) = 4908732 triangles au total
+
+[DEM2STL] Terminé : fuji.stl
+100 - done.

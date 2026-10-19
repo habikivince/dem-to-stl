@@ -1,0 +1,731 @@
+diff --git a/README.fr.md b/README.fr.md
+index 03dec45..2a2180e 100644
+--- a/README.fr.md
++++ b/README.fr.md
+@@ -284,6 +284,12 @@ une grille quasi identique.
+   d'erreur reçue en HTTP 200 (XML/HTML au lieu d'un GeoTIFF ou d'un PNG) n'est ni mise en
+   cache ni réutilisée si une exécution précédente l'y avait enregistrée (le fichier
+   invalide est retéléchargé).
++* Repli de résolution GSI : aux résolutions de travail fines (zoom 16-17), seule la couche DEM1A est
++  interrogée. Une tuile qu'elle n'a pas laissait un trou (ou « aucune tuile » pour toute la zone). Elle est maintenant remplacée par les couches suivantes à leur propre
++  zoom (DEM5A/5B au zoom 15, puis DEM10B au zoom 14) ; ces mosaïques plus grossières sont transmises
++  au ré-échantillonnage, qui les interpole (bilinéaire) sous la mosaïque fine. Le log indique « repli
++  de résolution ». Avec plusieurs sources de résolutions différentes, la plus grossière décide du
++  choix de `--resample auto`.
+ * Les tuiles d'élévation GSI sont dérivées du DEM (interpolées, pas de 1 cm), pas le
+   maillage JPGIS brut ; leur nombre est plafonné, donc une très grande zone utilise un
+   zoom plus grossier.
+diff --git a/README.md b/README.md
+index bedf05e..a1504a6 100644
+--- a/README.md
++++ b/README.md
+@@ -253,6 +253,11 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
+ * `--full-res` fetches each source's finest resolution (heavy downloads, same mesh
+   size). Kartverket and IGN otherwise resample server-side (nearest neighbour) at
+   twice the working resolution before averaging; `--full-res` removes that shortcut.
++* GSI resolution fallback: at fine working resolutions (zoom 16-17) only DEM1A is queried. A
++  tile it does not have used to leave a hole (or "no tiles" for the whole area). It is now replaced by the next layers at their own zoom (DEM5A/5B at zoom 15,
++  then DEM10B at zoom 14); those coarser mosaics are passed to the resampling step, which
++  interpolates them (bilinear) under the finer one. The log says "repli de résolution". With
++  several sources of different resolutions, the coarsest one decides the `--resample auto` choice.
+ * GSI elevation tiles are derived from the DEM (interpolated, 1 cm steps), not the
+   raw JPGIS mesh; the number of tiles is capped, so very large areas use a coarser zoom.
+ * `--resample auto` (default) uses `average` when the working grid is coarser than the
+diff --git a/mesh.py b/mesh.py
+index 7337f2b..9a1b6e7 100644
+--- a/mesh.py
++++ b/mesh.py
+@@ -209,6 +209,38 @@ def largest_connected_component(seed_mask):
+     return labeled == largest_label, n_components, sizes
+ 
+ 
++def build_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb):
++    """Parois verticales sur tout le bord du masque (deux triangles par arête de cellule), sans boucle Python.
++
++    Même résultat, dans le même ordre, que l'ancienne double boucle sur tous les nœuds : d'abord les arêtes
++    verticales (ligne par ligne), puis les arêtes horizontales (colonne par colonne). Une arête de bord sépare
++    une cellule incluse d'une cellule exclue ou hors grille ; la paroi est orientée vers l'extérieur."""
++    H1, W1 = quad_ok.shape
++    cols = np.pad(quad_ok, ((0, 0), (1, 1)))                     # (H1, W1 + 2)
++    left, right = cols[:, :-1], cols[:, 1:]                        # côtés gauche et droit de chaque arête verticale
++    iv, jv = np.nonzero(left != right)                             # ordre : ligne puis colonne, comme la boucle
++    rows = np.pad(quad_ok, ((1, 1), (0, 0)))                     # (H1 + 2, W1)
++    up, down = rows[:-1, :], rows[1:, :]                           # côtés haut et bas de chaque arête horizontale
++    jh, ih = np.nonzero((up != down).T)                            # ordre : colonne puis ligne, comme la boucle
++
++    def walls(p1, p2, outward):
++        n = len(p1)
++        p1b, p2b = p1.copy(), p2.copy()
++        p1b[:, 2] = zb
++        p2b[:, 2] = zb
++        out = np.empty((n, 2, 3, 3), dtype=np.float64)
++        o = outward[:, None, None]
++        out[:, 0] = np.where(o, np.stack([p1, p2, p1b], axis=1), np.stack([p2, p1, p1b], axis=1))
++        out[:, 1] = np.where(o, np.stack([p2, p2b, p1b], axis=1), np.stack([p2b, p2, p1b], axis=1))
++        return out.reshape(-1, 3, 3)
++
++    p1v = np.stack([Xmm[jv], Ymm[iv], z_top_mm[iv, jv]], axis=1)
++    p2v = np.stack([Xmm[jv], Ymm[iv + 1], z_top_mm[iv + 1, jv]], axis=1)
++    p1h = np.stack([Xmm[jh], Ymm[ih], z_top_mm[ih, jh]], axis=1)
++    p2h = np.stack([Xmm[jh + 1], Ymm[ih], z_top_mm[ih, jh + 1]], axis=1)
++    return np.concatenate([walls(p1v, p2v, left[iv, jv]), walls(p1h, p2h, down[ih, jh])])
++
++
+ BOTTOM_MODES = ("grid", "merged", "merged-rows")
+ 
+ 
+@@ -294,38 +326,9 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
+         all_tris = np.concatenate([top_tris, bot_tris, extra_tris, wall_tris])
+         return all_tris, len(top_tris), len(bot_tris) + len(bottom_band_tris) + len(band_tris), len(wall_tris)
+ 
+-    wall_tris = []
+-
+-    def add_wall(p1t, p2t, outward):
+-        p1b = (p1t[0], p1t[1], zb)
+-        p2b = (p2t[0], p2t[1], zb)
+-        if outward:
+-            wall_tris.append((p1t, p2t, p1b))
+-            wall_tris.append((p2t, p2b, p1b))
+-        else:
+-            wall_tris.append((p2t, p1t, p1b))
+-            wall_tris.append((p2b, p2t, p1b))
+-
+     H1, W1 = quad_ok.shape
+-    for i in range(H1):
+-        _progress(i, H1, "Parois (bord vertical)")
+-        for j in range(W1 + 1):
+-            left = quad_ok[i, j - 1] if j > 0 else False
+-            right = quad_ok[i, j] if j < W1 else False
+-            if left != right:
+-                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
+-                p2 = (Xmm[j], Ymm[i + 1], z_top_mm[i + 1, j])
+-                add_wall(p1, p2, outward=bool(left))
+-    for j in range(W1):
+-        _progress(j, W1, "Parois (bord horizontal)")
+-        for i in range(H1 + 1):
+-            up = quad_ok[i - 1, j] if i > 0 else False
+-            down = quad_ok[i, j] if i < H1 else False
+-            if up != down:
+-                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
+-                p2 = (Xmm[j + 1], Ymm[i], z_top_mm[i, j + 1])
+-                add_wall(p1, p2, outward=bool(down))
+-
+-    wall_tris = np.array(wall_tris, dtype=np.float64)
++    _progress(0, 2, "Parois (bord vertical)")
++    wall_tris = build_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb)
++    _progress(1, 2, "Parois (bord horizontal)")
+     all_tris = np.concatenate([top_tris, bot_tris, wall_tris])
+     return all_tris, len(top_tris), len(bot_tris), len(wall_tris)
+diff --git a/mesh_export.py b/mesh_export.py
+index a9a853c..9895cf3 100644
+--- a/mesh_export.py
++++ b/mesh_export.py
+@@ -70,15 +70,36 @@ def _positional(x):
+     return np.format_float_positional(np.float32(x), unique=True, trim="-")
+ 
+ 
++def _positional_lines(block, fmt):
++    """Lignes de sommets avec les coordonnées écrites par ``_positional`` (sans exposant, plus court
++    texte qui relit le même float32). Chaque valeur DISTINCTE n'est formatée qu'une fois : sur une grille
++    régulière, x et y n'ont que quelques centaines de valeurs distinctes pour des millions de sommets.
++    Le résultat est identique, caractère pour caractère, à un formatage valeur par valeur."""
++    block = np.ascontiguousarray(block, dtype=np.float32)
++    columns = []
++    for k in range(3):
++        col = np.ascontiguousarray(block[:, k])
++        # unicité sur les bits : -0.0 et 0.0 restent distincts (« -0 » et « 0 »)
++        _, first, inverse = np.unique(col.view(np.uint32), return_index=True, return_inverse=True)
++        strings = np.array([_positional(col[i]) for i in first], dtype=object)
++        columns.append(strings[inverse.reshape(-1)].tolist())
++    plain = fmt.replace("%.9g", "%s")
++    return "".join(plain % row for row in zip(*columns))
++
++
+ def _vertex_lines(vertices, fmt):
+     """Coordonnées en %.9g : 9 chiffres significatifs suffisent pour relire exactement un float32,
+     donc la même géométrie que le STL. Les rares valeurs notées avec exposant (|x| < 1e-4)
+-    sont réécrites sans exposant."""
++    sont réécrites sans exposant.
++
++    Remarque : le test ``"e" in text`` est aussi vrai quand le gabarit contient la lettre « e »
++    (``<vertex …>`` du 3MF) : la voie sans exposant est alors toujours utilisée, ce qui donne les
++    valeurs les plus courtes (« 12.4 » plutôt que « 12.3999996 »). Ce comportement est conservé."""
+     for s in range(0, len(vertices), CHUNK):
+-        block = vertices[s:s + CHUNK].astype(np.float64).tolist()
+-        text = "".join(fmt % (x, y, z) for x, y, z in block)
++        block = vertices[s:s + CHUNK].astype(np.float64)
++        text = "".join(fmt % (x, y, z) for x, y, z in block.tolist())
+         if "e" in text:
+-            text = "".join(fmt.replace("%.9g", "%s") % tuple(_positional(c) for c in row) for row in block)
++            text = _positional_lines(block, fmt)
+         yield text
+ 
+ 
+diff --git a/raster.py b/raster.py
+index fb753b5..9eb197b 100644
+--- a/raster.py
++++ b/raster.py
+@@ -197,11 +197,14 @@ RESAMPLE_CHOICES = ("auto", "average", "bilinear", "cubic", "cubicspline")
+ UPSAMPLE_RATIO = 1.05
+ 
+ 
+-def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8):
+-    """Taille du pixel de la source, en mètres dans le CRS cible, au voisinage de (cx, cy) ; la plus
+-    fine parmi au plus ``max_files`` fichiers de la liste ; sur chaque fichier, l'axe le plus grossier
+-    (un pixel en degrés est plus étroit en x qu'en y). None si elle ne peut pas être déterminée
+-    (l'appelant retombe alors sur `average`, comportement historique)."""
++def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8, reduce="min"):
++    """Taille du pixel de la source, en mètres dans le CRS cible, au voisinage de (cx, cy), parmi au plus
++    ``max_files`` fichiers de la liste : la plus fine (``reduce="min"``, défaut) ou la plus grossière
++    (``reduce="max"``) ; sur chaque fichier, l'axe le plus grossier (un pixel en degrés est plus étroit
++    en x qu'en y). None si elle ne peut pas être déterminée (l'appelant retombe alors sur `average`,
++    comportement historique)."""
++    if reduce not in ("min", "max"):
++        raise ValueError("reduce doit valoir 'min' ou 'max'")
+     paths = list(input_path) if isinstance(input_path, (list, tuple)) else [input_path]
+     if len(paths) > max_files:
+         step = len(paths) / max_files
+@@ -229,7 +232,7 @@ def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8):
+         except (RuntimeError, ValueError, TypeError):
+             continue
+         if size > 0 and math.isfinite(size):
+-            best = size if best is None else min(best, size)
++            best = size if best is None else (min(best, size) if reduce == "min" else max(best, size))
+     return best
+ 
+ 
+@@ -257,7 +260,8 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
+     fill=False : valeurs brutes, sans comblement ni complément (compare_dems).
+     inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone).
+     resample : "auto" (défaut), "average", "bilinear", "cubic" ou "cubicspline". En "auto", un DEM plus
+-    grossier que la grille de travail est interpolé (bilinear) au lieu d'être répliqué par blocs."""
++    grossier que la grille de travail est interpolé (bilinear) au lieu d'être répliqué par blocs ; avec
++    plusieurs sources de résolutions différentes, la plus grossière décide."""
+     if resample not in RESAMPLE_CHOICES:
+         raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
+     ds = gdal.Open(_primary(input_path))
+@@ -269,7 +273,9 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
+     xmin, xmax = cx - radius, cx + radius
+     ymin, ymax = cy - radius, cy + radius
+ 
+-    src_px = source_pixel_size_m(input_path, dst_srs_wkt, cx, cy) if resample == "auto" else None
++    # La source la plus GROSSIÈRE décide : dès qu'une source est agrandie, `average` la répliquerait par blocs
++    # (cas d'une mosaïque qui mêle une couche fine et un repli grossier, ex. GSI DEM1A + DEM5A).
++    src_px = source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, reduce="max") if resample == "auto" else None
+     alg = choose_resample_alg(resample, src_px, pixel_size_m)
+     if alg != "average":
+         why = (f"pixel de la source ≈ {src_px:.1f} m > pixel de travail {pixel_size_m:.2f} m : "
+diff --git a/sources.py b/sources.py
+index c644dd1..2496782 100644
+--- a/sources.py
++++ b/sources.py
+@@ -683,35 +683,32 @@ def _gsi_tile(z, x, y, cache_dir):
+     return None, None
+ 
+ 
+-def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
+-    bbox = circle_bbox_wgs84(lat, lon, radius_m)
+-    z = gsi_zoom_for_pixel(lat, pixel_size_m)
+-    x0, y0, x1, y1 = gsi_tile_range(bbox, z)
+-    while (x1 - x0 + 1) * (y1 - y0 + 1) > GSI_MAX_TILES and z > 0:
+-        z -= 1
+-        x0, y0, x1, y1 = gsi_tile_range(bbox, z)
+-        log(f"GSI : trop de tuiles, zoom abaissé à {z}")
+-    nx, ny = x1 - x0 + 1, y1 - y0 + 1
+-    log(f"GSI : zoom {z}, {nx * ny} tuile(s) (pixel de travail {pixel_size_m:.2f} m)")
++def _gsi_collect(z, tiles, cache_dir):
++    """Télécharge (ou lit en cache) les tuiles ``tiles`` (liste de (x, y)) au zoom ``z``.
++    Renvoie ({(x, y): altitudes 256x256}, {couche: nombre})."""
++    found, used = {}, {}
++    for x, y in tiles:
++        h, layer = _gsi_tile(z, x, y, cache_dir)
++        if h is None:
++            continue
++        found[(x, y)] = h
++        used[layer] = used.get(layer, 0) + 1
++    return found, used
+ 
+-    mosaic = np.full((ny * 256, nx * 256), NODATA, dtype=np.float32)
+-    used, missing = {}, 0
+-    for j in range(ny):
+-        for i in range(nx):
+-            h, layer = _gsi_tile(z, x0 + i, y0 + j, cache_dir)
+-            if h is None:
+-                missing += 1
+-                continue
+-            used[layer] = used.get(layer, 0) + 1
+-            mosaic[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = np.where(np.isnan(h), NODATA, h)
+-    if not used:
+-        raise NoCoverage("GSI : aucune tuile d'élévation pour cette zone")
+-    log("GSI : couches utilisées " + ", ".join(f"{k}={v}" for k, v in used.items())
+-        + (f" ; {missing} tuile(s) absente(s)" if missing else ""))
+ 
++def _gsi_write_mosaic(found, z, cache_dir):
++    """Écrit un GeoTIFF Web Mercator (nodata partout où il n'y a pas de tuile) couvrant la boîte englobante
++    des tuiles de ``found`` ({(x, y): altitudes}) au zoom ``z``. Renvoie son chemin."""
++    xs, ys = [k[0] for k in found], [k[1] for k in found]
++    x0, y0, nx, ny = min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
++    mosaic = np.full((ny * 256, nx * 256), NODATA, dtype=np.float32)
++    for (x, y), h in found.items():
++        i, j = x - x0, y - y0
++        mosaic[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = np.where(np.isnan(h), NODATA, h)
+     tile_m = 2 * WM_ORIGIN / 2 ** z
+     px = tile_m / 256
+     dest = os.path.join(cache_dir, "gsi", f"mosaic_z{z}_{x0}_{y0}_{nx}x{ny}.tif")
++    os.makedirs(os.path.dirname(dest), exist_ok=True)
+     ds = gdal.GetDriverByName("GTiff").Create(dest, nx * 256, ny * 256, 1, gdal.GDT_Float32,
+                                               ["COMPRESS=DEFLATE", "TILED=YES"])
+     ds.SetGeoTransform((-WM_ORIGIN + x0 * tile_m, px, 0, WM_ORIGIN - y0 * tile_m, 0, -px))
+@@ -720,7 +717,56 @@ def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
+     band.SetNoDataValue(NODATA)
+     band.WriteArray(mosaic)
+     ds = None
+-    return [dest]
++    return dest
++
++
++def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
++    """Mosaïque(s) GeoTIFF des tuiles d'élévation GSI. Renvoie une liste de chemins, du plus grossier au plus
++    fin : `gdal.Warp` les superpose dans l'ordre (le dernier l'emporte là où il a des données).
++
++    Repli de résolution : au zoom demandé, seules les couches dont le zoom maximal est suffisant sont
++    interrogées (DEM1A jusqu'au zoom 17, DEM5A/5B jusqu'à 15, DEM10B jusqu'à 14). Pour une tuile absente, on
++    prend donc la tuile ancêtre de la couche suivante (zoom 15, puis 14) ; cette tuile plus grossière est
++    ensuite interpolée par le ré-échantillonnage de `raster.warp_window` (bilinéaire quand elle est agrandie)."""
++    bbox = circle_bbox_wgs84(lat, lon, radius_m)
++    z = gsi_zoom_for_pixel(lat, pixel_size_m)
++    x0, y0, x1, y1 = gsi_tile_range(bbox, z)
++    while (x1 - x0 + 1) * (y1 - y0 + 1) > GSI_MAX_TILES and z > 0:
++        z -= 1
++        x0, y0, x1, y1 = gsi_tile_range(bbox, z)
++        log(f"GSI : trop de tuiles, zoom abaissé à {z}")
++    nx, ny = x1 - x0 + 1, y1 - y0 + 1
++    log(f"GSI : zoom {z}, {nx * ny} tuile(s) (pixel de travail {pixel_size_m:.2f} m)")
++
++    fine, used = _gsi_collect(z, [(x0 + i, y0 + j) for j in range(ny) for i in range(nx)], cache_dir)
++    missing_fine = {(x0 + i, y0 + j) for j in range(ny) for i in range(nx)} - set(fine)
++
++    coarse_dests = []                                     # du plus fin au plus grossier, inversé à la fin
++    uncovered = set(missing_fine)
++    for level in sorted({zm for _, zm in GSI_LAYERS if zm < z}, reverse=True):
++        if not uncovered:
++            break
++        dz = z - level
++        ancestors = sorted({(x >> dz, y >> dz) for x, y in uncovered})
++        found, used_c = _gsi_collect(level, ancestors, cache_dir)
++        if not found:
++            continue
++        coarse_dests.append(_gsi_write_mosaic(found, level, cache_dir))
++        uncovered = {(x, y) for x, y in uncovered if (x >> dz, y >> dz) not in found}
++        log(f"GSI : repli de résolution au zoom {level} ({sum(used_c.values())} tuile(s) : "
++            + ", ".join(f"{k}={v}" for k, v in used_c.items()) + f") ; {len(missing_fine) - len(uncovered)} "
++            f"tuile(s) absente(s) du zoom {z} couvertes au total")
++    if not fine and not coarse_dests:
++        raise NoCoverage("GSI : aucune tuile d'élévation pour cette zone")
++    if fine:
++        log("GSI : couches utilisées " + ", ".join(f"{k}={v}" for k, v in used.items())
++            + (f" ; {len(missing_fine)} tuile(s) absente(s)" if missing_fine else ""))
++    if uncovered and (fine or coarse_dests):
++        log(f"GSI : {len(uncovered)} tuile(s) du zoom {z} sans aucune donnée (mer ou hors couverture)")
++    paths = list(reversed(coarse_dests))
++    if fine:
++        paths.append(_gsi_write_mosaic(fine, z, cache_dir))
++    return paths
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tests/test_export_formatting.py b/tests/test_export_formatting.py
+new file mode 100644
+index 0000000..fc779b7
+--- /dev/null
++++ b/tests/test_export_formatting.py
+@@ -0,0 +1,58 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Écriture des sommets du 3MF/OBJ : la voie sans exposant formate chaque valeur distincte une seule fois,
++mais le texte produit doit rester identique, caractère pour caractère, à l'ancien formatage valeur par valeur."""
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import mesh_export  # noqa: E402
++
++VERTEX_FMT = '<vertex x="%.9g" y="%.9g" z="%.9g"/>'
++OBJ_FMT = "v %.9g %.9g %.9g\n"
++
++
++def reference_vertex_lines(vertices, fmt, chunk=200_000):
++    """Ancien code de mesh_export._vertex_lines (formatage valeur par valeur), repris tel quel."""
++    for s in range(0, len(vertices), chunk):
++        block = vertices[s:s + chunk].astype(np.float64).tolist()
++        text = "".join(fmt % (x, y, z) for x, y, z in block)
++        if "e" in text:
++            text = "".join(fmt.replace("%.9g", "%s") % tuple(mesh_export._positional(c) for c in row) for row in block)
++        yield text
++
++
++def _arrays():
++    rng = np.random.default_rng(0)
++    grid = np.stack(np.meshgrid(np.arange(40) * 0.1 - 2.0, np.arange(40) * 0.1 - 2.0, [0.0])).reshape(3, -1).T
++    special = np.array([[0.0, -0.0, 1e-7], [1e-30, -1e-30, 123456.789], [3.4e38, -3.4e38, 0.1],
++                        [0.1, 0.2, 0.3], [-0.0, 0.0, 5.0], [1e-5, 99999.99, -2.5e-9]] * 20)
++    return {"aléatoire": rng.normal(0, 50, (4000, 3)), "grille": grid, "valeurs particulières": special,
++            "un seul sommet": np.array([[1.5, -2.25, 0.0]]), "aucun": np.empty((0, 3))}
++
++
++@pytest.mark.parametrize("fmt", [VERTEX_FMT, OBJ_FMT])
++@pytest.mark.parametrize("name", list(_arrays()))
++def test_vertex_text_is_identical_to_the_value_by_value_formatting(name, fmt):
++    v = _arrays()[name]
++    assert "".join(mesh_export._vertex_lines(v, fmt)) == "".join(reference_vertex_lines(v, fmt))
++
++
++def test_positional_lines_keep_negative_zero_distinct_from_zero():
++    text = mesh_export._positional_lines(np.array([[0.0, -0.0, 1.0], [-0.0, 0.0, 2.0]]), VERTEX_FMT)
++    assert 'x="0" y="-0" z="1"' in text and 'x="-0" y="0" z="2"' in text
++
++
++def test_positional_lines_never_use_exponent_notation():
++    v = np.array([[1e-7, -3e-9, 2.5e-30], [1e20, 1e-5, 0.5]])
++    text = mesh_export._positional_lines(v, VERTEX_FMT)
++    assert "e" not in text.replace("vertex", "")
++
++
++def test_chunk_boundary_does_not_change_the_text(monkeypatch):
++    v = _arrays()["aléatoire"]
++    whole = "".join(mesh_export._vertex_lines(v, VERTEX_FMT))
++    monkeypatch.setattr(mesh_export, "CHUNK", 777)
++    assert "".join(mesh_export._vertex_lines(v, VERTEX_FMT)) == whole
+diff --git a/tests/test_gsi_fallback.py b/tests/test_gsi_fallback.py
+new file mode 100644
+index 0000000..fb8f4b0
+--- /dev/null
++++ b/tests/test_gsi_fallback.py
+@@ -0,0 +1,183 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Repli de résolution GSI : une tuile absente d'une couche fine est remplacée par la tuile de la couche
++suivante (zoom 15 puis 14), interpolée par le ré-échantillonnage, au lieu de laisser un trou ou de lever NoCoverage."""
++import re
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++from osgeo import gdal, osr
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import raster  # noqa: E402
++import sources  # noqa: E402
++from conftest import write_synthetic_tif  # noqa: E402
++from test_sources import make_png  # noqa: E402
++
++LAT, LON = 35.36, 138.72
++CX, CY, _ = osr.CoordinateTransformation(sources._srs(4326), sources._srs(3857)).TransformPoint(LON, LAT)
++URL_RE = re.compile(r"/xyz/([a-z0-9_]+)/(\d+)/(\d+)/(\d+)\.png")
++
++
++def tile_geo(z, x, y):
++    tile_m = 2 * sources.WM_ORIGIN / 2 ** z
++    return -sources.WM_ORIGIN + x * tile_m, sources.WM_ORIGIN - y * tile_m, tile_m / 256
++
++
++def ramp(z, x, y, offset=0.0):
++    """Altitudes 256x256 d'un plan incliné défini en mètres Web Mercator, identique à tout zoom."""
++    x_o, y_o, px = tile_geo(z, x, y)
++    X, Y = np.meshgrid(x_o + (np.arange(256) + 0.5) * px, y_o - (np.arange(256) + 0.5) * px)
++    return 1000.0 + offset + 0.3 * (X - CX) + 0.5 * (Y - CY)
++
++
++@pytest.fixture
++def fake_gsi(monkeypatch):
++    """Réseau GSI simulé. `avail` : {couche: prédicat(z, x, y)} ; `offset` : {couche: décalage d'altitude}."""
++    state = {"avail": {}, "offset": {}, "calls": []}
++
++    def fake_get(url, timeout=None, retries=None):
++        layer, z, x, y = URL_RE.search(url).groups()
++        z, x, y = int(z), int(x), int(y)
++        state["calls"].append((layer, z, x, y))
++        pred = state["avail"].get(layer)
++        if pred is None or not pred(z, x, y):
++            return None
++        return make_png(ramp(z, x, y, state["offset"].get(layer, 0.0)))
++
++    monkeypatch.setattr(sources, "_http_get", fake_get)
++    return state
++
++
++def wm_center():
++    return CX, CY
++
++
++def pixel_size(path):
++    return gdal.Open(path).GetGeoTransform()[1]
++
++
++def warp_wm(paths, cx, cy, radius, px, **kw):
++    wkt = sources._srs(3857).ExportToWkt()
++    elev = raster.warp_window(paths, wkt, cx, cy, radius, px, progress_cb=lambda *a: 1, fill=False, **kw)
++    return elev[0]
++
++
++def truth(cx, cy, radius, px):
++    n = int(round(2 * radius / px))
++    X, Y = np.meshgrid(cx - radius + (np.arange(n) + 0.5) * px, cy + radius - (np.arange(n) + 0.5) * px)
++    return 1000.0 + 0.3 * (X - CX) + 0.5 * (Y - CY)
++
++
++quiet = lambda *a, **k: None  # noqa: E731
++
++
++def test_without_fine_layer_the_coarser_layer_is_used_instead_of_no_coverage(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {"dem5a_png": lambda z, x, y: z == 15}
++    paths = sources.fetch_gsi(LAT, LON, 200, str(tmp_path), 1.0, log=quiet)          # pixel de 1 m : zoom 17
++    assert len(paths) == 1 and pixel_size(paths[0]) == pytest.approx(2 * sources.WM_ORIGIN / 2 ** 15 / 256)
++
++
++def test_fallback_is_interpolated_so_a_linear_surface_is_reproduced(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {"dem5a_png": lambda z, x, y: z == 15}
++    cx, cy = wm_center()
++    paths = sources.fetch_gsi(LAT, LON, 150, str(tmp_path), 1.0, log=quiet)
++    auto = warp_wm(paths, cx, cy, 100.0, 2.0)                                       # auto : bilinéaire
++    avg = warp_wm(paths, cx, cy, 100.0, 2.0, resample="average")                     # ancien comportement : par blocs
++    t = truth(cx, cy, 100.0, 2.0)
++    assert np.abs(auto - t).max() < 0.05                                             # un plan est reproduit exactement
++    assert np.abs(avg - t).max() > 0.5                                               # terrasses de 4,8 m sur une pente de 0,3 à 0,5
++
++
++def test_fine_tiles_override_the_fallback_where_they_exist(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {"dem5a_png": lambda z, x, y: z == 15,
++                         "dem1a_png": lambda z, x, y: z == 17 and x % 2 == 0}
++    fake_gsi["offset"] = {"dem1a_png": 100.0}                                        # décalage pour distinguer les couches
++    paths = sources.fetch_gsi(LAT, LON, 300, str(tmp_path), 1.0, log=quiet)
++    assert len(paths) == 2 and pixel_size(paths[0]) > pixel_size(paths[1])           # grossier d'abord, fin en dernier
++    out = warp_wm(paths, CX, CY, 280.0, 1.0, resample="bilinear")                   # fenêtre de 560 m : plusieurs tuiles de ~250 m
++    diff = out - truth(CX, CY, 280.0, 1.0)
++    fine = np.abs(diff - 100.0) < 0.3
++    coarse = np.abs(diff) < 0.3
++    assert fine.mean() > 0.15 and coarse.mean() > 0.15                               # les deux couches sont visibles
++    assert (fine | coarse).mean() > 0.97                                             # et rien d'autre (pas de zone aberrante)
++
++
++def test_no_coarse_request_when_every_fine_tile_exists(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {"dem1a_png": lambda z, x, y: z == 17}
++    paths = sources.fetch_gsi(LAT, LON, 150, str(tmp_path), 1.0, log=quiet)
++    assert len(paths) == 1 and {c[1] for c in fake_gsi["calls"]} == {17}
++
++
++def test_chain_goes_from_zoom_15_to_zoom_14(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {"dem5a_png": lambda z, x, y: z == 15 and x % 2 == 0,        # zoom 15 incomplet
++                         "dem_png": lambda z, x, y: z == 14}                          # zoom 14 partout
++    paths = sources.fetch_gsi(LAT, LON, 900, str(tmp_path), 1.0, log=quiet)
++    sizes = [pixel_size(p) for p in paths]
++    assert len(paths) == 2 and sizes[0] > sizes[1] > 0                                # zoom 14 puis zoom 15
++    assert {c[1] for c in fake_gsi["calls"]} >= {14, 15, 17}
++
++
++def test_no_data_anywhere_is_still_no_coverage(fake_gsi, tmp_path):
++    with pytest.raises(sources.NoCoverage):
++        sources.fetch_gsi(LAT, LON, 150, str(tmp_path), 1.0, log=quiet)
++
++
++def test_zoom_14_has_no_fallback_since_every_layer_is_already_tried(fake_gsi, tmp_path):
++    fake_gsi["avail"] = {}
++    with pytest.raises(sources.NoCoverage):
++        sources.fetch_gsi(LAT, LON, 3000, str(tmp_path), 9.0, log=quiet)
++    assert {c[1] for c in fake_gsi["calls"]} == {14}
++
++
++# --- mélange de résolutions dans warp_window --------------------------------------------------------
++
++def test_source_pixel_size_max_of_a_list(tmp_path):
++    a, b = tmp_path / "a.tif", tmp_path / "b.tif"
++    write_synthetic_tif(a, np.full((20, 20), 1.0), 600000.0, 5100000.0, 30.0, 32631)
++    write_synthetic_tif(b, np.full((20, 20), 1.0), 600600.0, 5100000.0, 5.0, 32631)
++    wkt = sources._srs(32631).ExportToWkt()
++    assert raster.source_pixel_size_m([str(a), str(b)], wkt, 600300.0, 5099800.0, reduce="max") == pytest.approx(30.0, rel=1e-3)
++    assert raster.source_pixel_size_m([str(a), str(b)], wkt, 600300.0, 5099800.0, reduce="min") == pytest.approx(5.0, rel=1e-3)
++    with pytest.raises(ValueError):
++        raster.source_pixel_size_m(str(a), wkt, 0, 0, reduce="mean")
++
++
++def test_auto_uses_bilinear_when_any_source_of_a_mixed_list_is_enlarged(tmp_path, capsys):
++    rng = np.random.default_rng(3)
++    from scipy import ndimage
++    coarse, fine = tmp_path / "coarse.tif", tmp_path / "fine.tif"
++    write_synthetic_tif(coarse, 500 + ndimage.gaussian_filter(rng.normal(size=(60, 60)), 2) * 60, 600000.0, 5100000.0, 30.0, 32631)
++    write_synthetic_tif(fine, 500 + ndimage.gaussian_filter(rng.normal(size=(80, 80)), 2) * 5, 600000.0, 5100000.0 - 1800.0 + 400.0, 5.0, 32631)
++    wkt = sources._srs(32631).ExportToWkt()
++    cx, cy = 600900.0, 5099100.0
++    out = raster.warp_window([str(coarse), str(fine)], wkt, cx, cy, 800.0, 5.0, progress_cb=lambda *a: 1, fill=False)[0]
++    assert "ré-échantillonnage bilinear" in capsys.readouterr().out
++    region = out[: int(0.25 * out.shape[0])]                                           # zone couverte par la source grossière seule
++    gy, gx = np.gradient(np.where(region < -1000, np.nan, region))
++    assert np.nanmean((gx == 0) & (gy == 0)) < 0.01
++
++
++# --- de bout en bout par la ligne de commande -----------------------------------------------------
++
++def test_cli_gsi_source_uses_the_fallback_instead_of_failing(fake_gsi, monkeypatch, tmp_path, capsys):
++    import check_stl
++    import circle_dem_to_stl
++    import mesh_export
++    fake_gsi["avail"] = {"dem5a_png": lambda z, x, y: z == 15}                       # aucune tuile DEM1A au zoom 17
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(sys, "argv", ["x", "--source", "gsi", "--lat", str(LAT), "--lon", str(LON), "--radius", "150",
++                                      "--diameter-mm", "60", "--vexag", "1", "--base-mm", "2",
++                                      "--print-spacing-mm", "0.2", "--output", str(tmp_path / "out.stl"),
++                                      "--cache-dir", str(tmp_path / "cache")])
++    circle_dem_to_stl.main()
++    out = capsys.readouterr().out
++    assert "repli de résolution au zoom 15" in out and "ré-échantillonnage bilinear" in out
++    tris = mesh_export.read_triangles(str(tmp_path / "out.stl"))
++    res = {n: ok for n, ok, _ in check_stl.check(tris, 60.0, 2.0, tol_mm=1.5)}
++    assert all(res.values()), res
++    # La rampe est définie en mètres Web Mercator, étirés de 1/cos(latitude) par rapport aux mètres au sol :
++    # pente au sol = hypot(0,3 ; 0,5) / cos(lat). Disque de 300 m à l'échelle 0,2 mm/m : dénivelé attendu en mm.
++    expected = float(np.hypot(0.3, 0.5)) / np.cos(np.radians(LAT)) * 300.0 * 0.2
++    assert tris[:, :, 2].max() == pytest.approx(expected, rel=0.02)
+diff --git a/tests/test_walls_vectorized.py b/tests/test_walls_vectorized.py
+new file mode 100644
+index 0000000..04d3de1
+--- /dev/null
++++ b/tests/test_walls_vectorized.py
+@@ -0,0 +1,136 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Parois sans boucle Python (mesh.build_plain_walls) et non-régression du maillage par défaut.
++
++1. Les parois vectorisées sont comparées, tableau contre tableau (mêmes valeurs, même ordre), à l'ancienne
++   double boucle sur tous les nœuds, conservée ici comme implémentation de référence.
++2. Des empreintes SHA-256 de sorties calculées avec le code ORIGINAL de ``mesh.py`` (avant les chantiers de
++   l'audit) sur des entrées entièrement déterministes (entiers et multiples exacts, sans générateur
++   aléatoire) vérifient que le maillage par défaut (fond « grid ») n'a pas changé d'un seul bit. Si un
++   changement de maillage est voulu un jour, ces empreintes sont à régénérer volontairement."""
++import hashlib
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import mesh  # noqa: E402
++from test_mesh_properties import blob  # noqa: E402
++
++
++def reference_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb):
++    """L'ancienne construction (double boucle sur tous les nœuds), reprise telle quelle du code d'origine."""
++    wall_tris = []
++
++    def add_wall(p1t, p2t, outward):
++        p1b = (p1t[0], p1t[1], zb)
++        p2b = (p2t[0], p2t[1], zb)
++        if outward:
++            wall_tris.append((p1t, p2t, p1b))
++            wall_tris.append((p2t, p2b, p1b))
++        else:
++            wall_tris.append((p2t, p1t, p1b))
++            wall_tris.append((p2b, p2t, p1b))
++
++    H1, W1 = quad_ok.shape
++    for i in range(H1):
++        for j in range(W1 + 1):
++            left = quad_ok[i, j - 1] if j > 0 else False
++            right = quad_ok[i, j] if j < W1 else False
++            if left != right:
++                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
++                p2 = (Xmm[j], Ymm[i + 1], z_top_mm[i + 1, j])
++                add_wall(p1, p2, outward=bool(left))
++    for j in range(W1):
++        for i in range(H1 + 1):
++            up = quad_ok[i - 1, j] if i > 0 else False
++            down = quad_ok[i, j] if i < H1 else False
++            if up != down:
++                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
++                p2 = (Xmm[j + 1], Ymm[i], z_top_mm[i, j + 1])
++                add_wall(p1, p2, outward=bool(down))
++    return np.array(wall_tris, dtype=np.float64)
++
++
++def _inputs(mask, seed=0):
++    H, W = mask.shape
++    rng = np.random.default_rng(seed)
++    z = rng.normal(10.0, 3.0, (H + 1, W + 1))
++    return z, np.arange(W + 1) * 0.1, -np.arange(H + 1) * 0.1
++
++
++@pytest.mark.parametrize("seed", range(20))
++def test_vectorized_walls_equal_the_original_loops_exactly(seed):
++    mask = blob(seed, n=36, keep=0.35 + 0.04 * (seed % 7))
++    z, X, Y = _inputs(mask, seed)
++    got = mesh.build_plain_walls(mask, X, Y, z, -2.0)
++    ref = reference_plain_walls(mask, X, Y, z, -2.0)
++    assert got.shape == ref.shape and np.array_equal(got, ref)
++
++
++def test_vectorized_walls_edge_cases():
++    cases = {
++        "une cellule": np.pad(np.ones((1, 1), bool), 3),
++        "grille pleine (le masque touche les quatre bords)": np.ones((7, 9), bool),
++        "bande d'une cellule contre le bord": np.pad(np.ones((1, 8), bool), ((0, 6), (0, 0))),
++        "damier de 2x2 (le pincement est déjà traité en amont)": np.array([[1, 0], [0, 1]], bool),
++        "trou central": np.pad(np.pad(np.zeros((3, 3), bool), 2, constant_values=True), 1),
++    }
++    for name, mask in cases.items():
++        z, X, Y = _inputs(mask)
++        got = mesh.build_plain_walls(mask, X, Y, z, -1.0)
++        assert np.array_equal(got, reference_plain_walls(mask, X, Y, z, -1.0)), name
++
++
++def test_vectorized_walls_return_an_empty_array_for_an_empty_mask():
++    mask = np.zeros((5, 6), bool)
++    z, X, Y = _inputs(mask)
++    got = mesh.build_plain_walls(mask, X, Y, z, -1.0)
++    assert got.shape == (0, 3, 3)
++
++
++# --- non-régression du maillage par défaut (empreintes calculées avec le code d'origine) -----------------
++
++def _golden_case(name):
++    n = 41
++    ii, jj = np.mgrid[0:n, 0:n]
++    elev = (((ii * 7 + jj * 13) % 17) * 3.5 + (ii * jj % 5) * 1.25).astype(np.float64)    # valeurs exactes
++    ci, cj = np.mgrid[0:n - 1, 0:n - 1]
++    d2 = (ci - 19) ** 2 + (cj - 19) ** 2
++    if name == "disc":
++        mask = d2 <= 16 ** 2
++    elif name == "ring":
++        mask = (d2 <= 17 ** 2) & (d2 >= 6 ** 2)
++    else:
++        mask = np.zeros((n - 1, n - 1), bool)
++        mask[3:35, 3:15] = True
++        mask[25:37, 3:36] = True
++    return elev, mask, jj[0].astype(np.float64), -ii[:, 0].astype(np.float64)
++
++
++def _digest(t):
++    return hashlib.sha256(np.ascontiguousarray(t, dtype=np.float64).tobytes()).hexdigest()
++
++
++GOLDEN = {
++    "disc": ("b67ab82a118848316918f9b5384c9aaea0b7d44919788d8173e4d43f4aca66db", (1594, 1594, 264)),
++    "ring": ("1186a23b84c987f24dbb37c906e3aca33914af5fe3b3e181fa78ac9e63ec5f8e", (1584, 1584, 368)),
++    "L": ("a207f228bf75f8975bc18d955db3cfc5d7502ca07cffd6403a950dd6acebaf53", (1320, 1320, 268)),
++}
++
++
++@pytest.mark.parametrize("name", sorted(GOLDEN))
++def test_default_mesh_is_bit_identical_to_the_original_code(name):
++    elev, mask, xs, ys = _golden_case(name)
++    tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(elev, mask.copy(), xs, ys, 0.1, 1.5, 2.0, float(elev.min()))
++    digest, counts = GOLDEN[name]
++    assert (n_top, n_bot, n_wall) == counts and _digest(tris) == digest
++
++
++def test_default_mesh_with_smooth_wall_is_bit_identical_to_the_original_code():
++    elev, mask, xs, ys = _golden_case("disc")
++    tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
++        elev, mask.copy(), xs, ys, 0.1, 1.5, 2.0, float(elev.min()), smooth_wall=True, circle_radius_mm=16.5 * 0.1)
++    assert (n_top, n_bot, n_wall) == (1594, 2122, 264)
++    assert _digest(tris) == "ab28b98842dff622c351a9dcd984bc306063f774f33278619aecc08a0ae8060b"

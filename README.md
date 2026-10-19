@@ -153,6 +153,12 @@ python circle_dem_to_stl.py \
 | `--base-mm` | Flat base thickness, in mm | prompted if omitted (3) |
 | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
 | `--print-spacing-mm` | Target mesh resolution, in mm | 0.2 |
+| `--resample` | DEM resampling: `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
+| `--top` | Top-surface triangulation: `grid`, `adaptive` (prototype) | `grid` |
+| `--top-tol-mm` | With `--top adaptive`: vertical tolerance, in print mm | 0.05 |
+| `--diagonal` | Cell diagonal of the top surface: `fixed`, `adaptive` (prototype) | `fixed` |
+| `--bottom` | Flat-bottom triangulation: `grid`, `merged` (prototype), `merged-rows` (comparison) | `grid` |
+| `--bottom-max-cells` | With `merged-rows`: maximum rectangle side, in cells (0 = unlimited) | 0 |
 | `--sea-level` | Enables island mode at this elevation (m) | disabled |
 | `--min-elevation` | Threshold for excluding interpolation artifacts, in m | -50 |
 | `--land-threshold` | Land/water-noise threshold above `--sea-level`, in m | 1.0 |
@@ -238,7 +244,8 @@ allows 1 request per second and expects an identifying User-Agent (override with
 
 ### Resolution and quality of automatic sources
 
-The mesh is limited by `--print-spacing-mm`: the DEM is resampled (`average`) to
+The mesh is limited by `--print-spacing-mm`: the DEM is resampled (`average` when the
+working grid is coarser than the source, see `--resample` below) to
 `print-spacing / scale` metres per pixel (shown as "résolution de ré-échantillonnage"
 in the log, e.g. 8 m for a 150 mm print of a 3 km radius). Sources therefore fetch
 only the resolution needed for that grid (swisstopo 2 m instead of 0.5 m, GSI tiles
@@ -249,8 +256,52 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
 * `--full-res` fetches each source's finest resolution (heavy downloads, same mesh
   size). Kartverket and IGN otherwise resample server-side (nearest neighbour) at
   twice the working resolution before averaging; `--full-res` removes that shortcut.
+* GSI resolution fallback: at fine working resolutions (zoom 16-17) only DEM1A is queried. A
+  tile it does not have used to leave a hole (or "no tiles" for the whole area). It is now replaced by the next layers at their own zoom (DEM5A/5B at zoom 15,
+  then DEM10B at zoom 14); those coarser mosaics are passed to the resampling step, which
+  interpolates them (bilinear) under the finer one. The log says "repli de résolution". With
+  several sources of different resolutions, the coarsest one decides the `--resample auto` choice.
 * GSI elevation tiles are derived from the DEM (interpolated, 1 cm steps), not the
   raw JPGIS mesh; the number of tiles is capped, so very large areas use a coarser zoom.
+* `--resample auto` (default) uses `average` when the working grid is coarser than the
+  source (averaging is anti-aliasing) and `bilinear` when it is finer, i.e. when the DEM
+  is enlarged (for example a 30 m global DEM on a small radius, or the Copernicus
+  fallback). GDAL's `average` then behaves like nearest neighbour: the surface becomes
+  flat plateaus separated by steps (in a synthetic test, 25 to 77 % of the cells had
+  exactly zero slope at 4x to 16x enlargement). The log says "ré-échantillonnage bilinear"
+  when this applies. `cubic` can overshoot near cliffs (about 7 % of a step, i.e. 71 m on
+  a 1000 m cliff); `cubicspline` smooths without overshooting; `average` forces the
+  previous behaviour.
+* `--top adaptive` (prototype, default stays `grid`) replaces the top surface with a bounded-error
+  RTIN mesh (right-triangulated irregular network): very few triangles where the relief is smooth,
+  full resolution along the outline and along the 1024-cell block seams, so the walls and the
+  bottom are unchanged and the solid stays watertight. The tolerance is nominal: measured against the
+  DEM nodes on four real DEMs, the largest deviation is 1.5 to 1.8 times `--top-tol-mm` (to guarantee
+  a given maximum error, use half of it). The reduction depends on how much real detail the working
+  grid carries: a 5 m LiDAR-derived DEM printed at 250 mm / 0.2 mm goes from 2.5 M to 144 000 triangles
+  at 0.05 mm (-94 %); noise-like terrain loses almost nothing. Memory is bounded by the block size.
+  `--diagonal adaptive` is meaningless with it (refused).
+* `--diagonal adaptive` (prototype, default stays `fixed`) cuts each top cell along the diagonal that
+  joins the two corners with the smaller height difference. Same number of triangles, same
+  vertices, walls and bottom: only the surface changes. Measured at the cell centres against the
+  DEM itself on six real DEMs (5 m to 240 m pixels), the mean error drops by 4 % (grid step 4) to
+  7 % (step 8) compared with the fixed diagonal, by 13 to 25 % on the 5 m LiDAR-derived DEM, and
+  rises by 2.5 % at worst (the 240 m DEM). At the default 0.2 mm spacing the difference is very
+  small; it matters for coarse spacings relative to the terrain detail.
+* `--bottom merged` (prototype, default stays `grid`) triangulates the flat bottom with the squares
+  of a balanced quadtree, each one as a fan that keeps every required boundary node, so there
+  is no T-junction and the solid stays watertight. The geometry is identical (same plane, same
+  outline, same volume: the tests compare them to 1e-12) but the file has about half the
+  triangles (the bottom drops by 96 to 99 %), a lower RAM peak and a smaller file. The
+  triangles stay compact (aspect ratio at most 4 in the tests). `merged-rows` uses greedy
+  rectangles instead (the method of the my3dmaps project): even fewer triangles, but extremely
+  elongated ones (aspect ratio above 10^5 measured on a disc), kept for comparison only.
+  Check the result in your slicer and CAM before making it the default.
+* HTTP 429 and 503 answers with a `Retry-After` header (seconds or HTTP date) are waited for, at
+  least that long, capped at 60 s.
+* Downloads are checked: a truncated answer is retried, and an error page received with
+  HTTP 200 (XML/HTML instead of a GeoTIFF or PNG) is neither cached nor reused if an
+  earlier run stored it (the invalid cached file is downloaded again).
 * `compare_dems.py A B --lat .. --lon .. --radius .. --pixel-size ..` measures the
   difference between two DEMs on the working grid (mean offset, RMS, 95th percentile)
   to check an automatic source against manually downloaded data.
@@ -299,7 +350,9 @@ python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --rel
 Re-reads the binary STL (independently of the meshing code) and checks the largest
 horizontal dimension, the base thickness, the elevation range implied by the scale
 (with `--radius`, optionally against `--relief-m`, tolerance 1 %) and watertightness
-(open, non-manifold or badly oriented edges). Exit code 1 on failure; `--tol-mm`
+(open, non-manifold or badly oriented edges), the sign of the signed volume (an entirely
+inside-out solid is consistent edge by edge and only this sign reveals it) and degenerate
+triangles. Exit code 1 on failure; `--tol-mm`
 adjusts the dimension tolerance, `--no-watertight` skips the edge test on huge files.
 
 ### Place outlines (`--place ... --clip-to-place`)

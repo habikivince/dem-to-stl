@@ -1,0 +1,1045 @@
+diff --git a/README.fr.md b/README.fr.md
+index 2a2180e..8e9e73f 100644
+--- a/README.fr.md
++++ b/README.fr.md
+@@ -158,6 +158,9 @@ python circle_dem_to_stl.py \
+ | `--vexag` | Exagération verticale | demandée si omise (1.0) |
+ | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
+ | `--resample` | Ré-échantillonnage du DEM : `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
++| `--top` | Triangulation du dessus : `grid`, `adaptive` (prototype) | `grid` |
++| `--top-tol-mm` | Avec `--top adaptive` : tolérance verticale, en mm d'impression | 0.05 |
++| `--diagonal` | Diagonale de coupe des cellules du dessus : `fixed`, `adaptive` (prototype) | `fixed` |
+ | `--bottom` | Triangulation du fond plat : `grid`, `merged` (prototype), `merged-rows` (comparaison) | `grid` |
+ | `--bottom-max-cells` | Avec `merged-rows` : côté maximal d'un rectangle, en cellules (0 = sans limite) | 0 |
+ | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
+@@ -271,6 +274,23 @@ une grille quasi identique.
+   le cas. `cubic` peut dépasser près des falaises (environ 7 % de la marche, soit 71 m
+   sur une falaise de 1000 m) ; `cubicspline` lisse sans dépasser ; `average` impose
+   l'ancien comportement.
++* `--top adaptive` (prototype, le défaut reste `grid`) remplace le dessus par un maillage RTIN à
++  erreur bornée (réseau irrégulier de triangles rectangles) : très peu de triangles là où le relief
++  est lisse, pleine résolution le long du contour et des jonctions de blocs de 1024 cellules, donc
++  les parois et le fond sont inchangés et le solide reste étanche. La tolérance est nominale :
++  mesurée contre les nœuds du DEM sur quatre relevés réels, l'écart maximal vaut 1,5 à 1,8 fois
++  `--top-tol-mm` (pour garantir une erreur maximale donnée, en prendre la moitié). La réduction
++  dépend du détail réel que porte la grille de travail : un relevé de 5 m dérivé du LiDAR imprimé à
++  250 mm / 0,2 mm passe de 2,5 M à 144 000 triangles à 0,05 mm (−94 %) ; un relief de type bruit ne
++  perd presque rien. La mémoire est bornée par la taille des blocs. `--diagonal adaptive` n'a pas
++  de sens avec cette option (refusé).
++* `--diagonal adaptive` (prototype, le défaut reste `fixed`) coupe chaque cellule du dessus selon la
++  diagonale qui relie les deux coins de plus faible écart d'altitude. Même nombre de triangles, mêmes
++  sommets, mêmes parois et même fond : seule la surface change. Mesurée au centre des cellules contre
++  le DEM lui-même sur six relevés réels (pixels de 5 m à 240 m), l'erreur moyenne baisse de 4 % (pas de
++  grille 4) à 7 % (pas 8) par rapport à la diagonale fixe, de 13 à 25 % sur le relevé de 5 m dérivé du
++  LiDAR, et monte de 2,5 % au pire (le relevé de 240 m). Au pas par défaut de 0,2 mm la différence est
++  très faible ; elle compte pour des pas grossiers par rapport au détail du relief.
+ * `--bottom merged` (prototype, le défaut reste `grid`) triangule le fond plat avec les carrés d'un
+   quadtree équilibré, chacun en éventail gardant tous les nœuds de contour nécessaires : aucune
+   jonction en T, le solide reste étanche. La géométrie est identique (même plan, même contour,
+@@ -280,6 +300,8 @@ une grille quasi identique.
+   gloutons (la méthode du dépôt my3dmaps) : encore moins de triangles, mais extrêmement allongés
+   (allongement supérieur à 10^5 mesuré sur un disque), conservé pour comparaison seulement.
+   Vérifiez le résultat dans votre trancheur et votre FAO avant d'en faire le défaut.
++* Les réponses HTTP 429 et 503 avec un en-tête `Retry-After` (secondes ou date HTTP) sont
++  attendues, au moins cette durée, plafonnée à 60 s.
+ * Les téléchargements sont contrôlés : une réponse tronquée est retentée, et une page
+   d'erreur reçue en HTTP 200 (XML/HTML au lieu d'un GeoTIFF ou d'un PNG) n'est ni mise en
+   cache ni réutilisée si une exécution précédente l'y avait enregistrée (le fichier
+diff --git a/README.md b/README.md
+index a1504a6..b54e90b 100644
+--- a/README.md
++++ b/README.md
+@@ -154,6 +154,9 @@ python circle_dem_to_stl.py \
+ | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
+ | `--print-spacing-mm` | Target mesh resolution, in mm | 0.2 |
+ | `--resample` | DEM resampling: `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
++| `--top` | Top-surface triangulation: `grid`, `adaptive` (prototype) | `grid` |
++| `--top-tol-mm` | With `--top adaptive`: vertical tolerance, in print mm | 0.05 |
++| `--diagonal` | Cell diagonal of the top surface: `fixed`, `adaptive` (prototype) | `fixed` |
+ | `--bottom` | Flat-bottom triangulation: `grid`, `merged` (prototype), `merged-rows` (comparison) | `grid` |
+ | `--bottom-max-cells` | With `merged-rows`: maximum rectangle side, in cells (0 = unlimited) | 0 |
+ | `--sea-level` | Enables island mode at this elevation (m) | disabled |
+@@ -269,6 +272,22 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
+   when this applies. `cubic` can overshoot near cliffs (about 7 % of a step, i.e. 71 m on
+   a 1000 m cliff); `cubicspline` smooths without overshooting; `average` forces the
+   previous behaviour.
++* `--top adaptive` (prototype, default stays `grid`) replaces the top surface with a bounded-error
++  RTIN mesh (right-triangulated irregular network): very few triangles where the relief is smooth,
++  full resolution along the outline and along the 1024-cell block seams, so the walls and the
++  bottom are unchanged and the solid stays watertight. The tolerance is nominal: measured against the
++  DEM nodes on four real DEMs, the largest deviation is 1.5 to 1.8 times `--top-tol-mm` (to guarantee
++  a given maximum error, use half of it). The reduction depends on how much real detail the working
++  grid carries: a 5 m LiDAR-derived DEM printed at 250 mm / 0.2 mm goes from 2.5 M to 144 000 triangles
++  at 0.05 mm (-94 %); noise-like terrain loses almost nothing. Memory is bounded by the block size.
++  `--diagonal adaptive` is meaningless with it (refused).
++* `--diagonal adaptive` (prototype, default stays `fixed`) cuts each top cell along the diagonal that
++  joins the two corners with the smaller height difference. Same number of triangles, same
++  vertices, walls and bottom: only the surface changes. Measured at the cell centres against the
++  DEM itself on six real DEMs (5 m to 240 m pixels), the mean error drops by 4 % (grid step 4) to
++  7 % (step 8) compared with the fixed diagonal, by 13 to 25 % on the 5 m LiDAR-derived DEM, and
++  rises by 2.5 % at worst (the 240 m DEM). At the default 0.2 mm spacing the difference is very
++  small; it matters for coarse spacings relative to the terrain detail.
+ * `--bottom merged` (prototype, default stays `grid`) triangulates the flat bottom with the squares
+   of a balanced quadtree, each one as a fan that keeps every required boundary node, so there
+   is no T-junction and the solid stays watertight. The geometry is identical (same plane, same
+@@ -278,6 +297,8 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
+   rectangles instead (the method of the my3dmaps project): even fewer triangles, but extremely
+   elongated ones (aspect ratio above 10^5 measured on a disc), kept for comparison only.
+   Check the result in your slicer and CAM before making it the default.
++* HTTP 429 and 503 answers with a `Retry-After` header (seconds or HTTP date) are waited for, at
++  least that long, capped at 60 s.
+ * Downloads are checked: a truncated answer is retried, and an error page received with
+   HTTP 200 (XML/HTML instead of a GeoTIFF or PNG) is neither cached nor reused if an
+   earlier run stored it (the invalid cached file is downloaded again).
+diff --git a/adaptive_top.py b/adaptive_top.py
+new file mode 100644
+index 0000000..32cc5b3
+--- /dev/null
++++ b/adaptive_top.py
+@@ -0,0 +1,145 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""
++adaptive_top.py
++---------------
++Dessus adaptatif (PROTOTYPE, option --top adaptive) : maillage RTIN (Right-Triangulated Irregular Network,
++Evans et al. 2001 ; formulation « Martini » de Mapbox) à erreur bornée, avec bord du masque forcé.
++
++Principe. La grille de nœuds est complétée jusqu'à une taille 2^k + 1. Deux grands triangles rectangles la
++couvrent ; chacun se coupe en deux par la médiane de son hypoténuse, récursivement. Pour chaque milieu
++d'hypoténuse m, l'erreur est l'écart entre l'altitude du nœud et l'interpolation de l'hypoténuse, majoré par
++l'erreur des descendants. Un triangle est conservé tel quel si l'erreur de son milieu ne dépasse pas la
++tolérance ; sinon il est coupé. Le maillage obtenu est sans fissure : deux triangles voisins partagent leurs
++sommets.
++
++Adaptations au solide :
++  * les nœuds du bord du masque (cellules incluses contre cellules exclues ou hors masque) ont une erreur
++    infinie : ils sont toujours des sommets et les triangles qui les touchent sont des demi-cellules, donc
++    les parois verticales, construites arête de cellule par arête de cellule, s'y raccordent exactement ;
++  * les nœuds sans aucune cellule voisine dans le masque ont une erreur nulle (ils ne forcent rien) ;
++  * un triangle feuille n'est conservé que si sa cellule centrale est dans le masque.
++
++Garantie : l'écart entre l'altitude d'un nœud et la surface est borné par une petite multiple de la tolérance
++(l'erreur de chaque milieu est mesurée par rapport à l'interpolation de ses voisins hiérarchiques, qui
++peuvent eux-mêmes être omis ; le cumul est borné par la série géométrique, voir les tests). La fidélité n'est
++donc plus exacte aux nœuds, contrairement à la grille complète : c'est le prix de la réduction du nombre de
++triangles.
++
++Mémoire bornée : la grille est traitée par blocs de ``block`` cellules (puissance de deux, 1 024 par défaut),
++chacun avec son propre RTIN. Les cellules voisines situées hors du bloc comptent comme « hors masque » : les
++nœuds de jonction entre deux blocs sont donc forcés exactement comme le bord du masque, et les deux blocs y
++partagent les mêmes sommets (aucune fissure). Surcoût : une bande de demi-cellules le long des jonctions.
++
++Tout est vectorisé niveau par niveau (aucune récursion Python).
++"""
++import numpy as np
++
++
++def _children(ax, ay, bx, by, cx, cy):
++    """Triangles enfants (c, a, m) puis (b, c, m), m = milieu de l'hypoténuse ab."""
++    mx, my = (ax + bx) >> 1, (ay + by) >> 1
++    return (np.concatenate([cx, bx]), np.concatenate([cy, by]),
++            np.concatenate([ax, cx]), np.concatenate([ay, cy]),
++            np.concatenate([mx, mx]), np.concatenate([my, my]))
++
++
++def _rtin_block(quad_ok, Xmm, Ymm, z_top_mm, tol_mm):
++    """RTIN d'un bloc : cellules ``quad_ok`` (H, W), nœuds (H+1, W+1). Voir adaptive_top_triangles."""
++    H, W = quad_ok.shape
++    k = max(1, int(np.ceil(np.log2(max(H, W, 2)))))
++    T = 1 << k                                   # taille de la grille complétée, en cellules
++    N = T + 1                                    # en nœuds
++    z = np.pad(np.asarray(z_top_mm, dtype=np.float64), ((0, N - H - 1), (0, N - W - 1)), mode="edge")
++    X = np.pad(np.asarray(Xmm, dtype=np.float64), (0, N - W - 1), mode="edge")
++    Y = np.pad(np.asarray(Ymm, dtype=np.float64), (0, N - H - 1), mode="edge")
++    cells = np.zeros((T, T), dtype=bool)
++    cells[:H, :W] = quad_ok
++
++    cp = np.pad(cells, 1)                        # cellule (i, j) en cp[i + 1, j + 1]
++    around = np.stack([cp[0:N, 0:N], cp[0:N, 1:N + 1], cp[1:N + 1, 0:N], cp[1:N + 1, 1:N + 1]])
++    any_in, all_in = around.any(axis=0), around.all(axis=0)
++    forced = any_in & ~all_in                    # nœuds du bord du masque
++    outside = ~any_in                            # nœuds sans cellule voisine dans le masque
++
++    # --- niveaux, du plus grand au plus petit triangle : racines (a, b, c), c = angle droit -------------
++    i32 = np.int32
++    lv = (np.array([T, 0], i32), np.array([T, 0], i32), np.array([0, T], i32),
++          np.array([0, T], i32), np.array([T, 0], i32), np.array([0, T], i32))
++    levels = [lv]
++    for _ in range(2 * k - 1):                   # niveaux 0 .. 2k-1 : triangles dont l'hypoténuse a un milieu entier
++        lv = _children(*lv)
++        levels.append(lv)
++    # le niveau 2k (triangles d'une demi-cellule) n'a pas de milieu entier : il est généré à la demande
++
++    # --- erreurs, du plus petit au plus grand ------------------------------------------------------------
++    E = np.zeros((N, N), dtype=np.float64)
++    for depth in range(2 * k - 1, -1, -1):
++        ax, ay, bx, by, cx, cy = levels[depth]
++        mx, my = (ax + bx) >> 1, (ay + by) >> 1
++        own = np.abs(z[my, mx] - (z[ay, ax] + z[by, bx]) * 0.5)
++        own = np.where(forced[my, mx], np.inf, np.where(outside[my, mx], 0.0, own))
++        if depth < 2 * k - 1:                    # les enfants ont un milieu entier : on reprend leur erreur
++            child = np.maximum(E[(ay + cy) >> 1, (ax + cx) >> 1], E[(by + cy) >> 1, (bx + cx) >> 1])
++            own = np.maximum(own, child)
++        np.maximum.at(E, (my, mx), own)          # deux triangles partagent chaque milieu : on garde le maximum
++    root = levels[0]
++    del levels                                    # les niveaux ne servent plus : on libère la mémoire avant l'extraction
++
++    # --- extraction des triangles feuilles, du plus grand au plus petit -----------------------------------
++    leaves = []
++    cur = root
++    for depth in range(2 * k + 1):
++        ax, ay, bx, by, cx, cy = cur
++        if depth == 2 * k:
++            keep, split = np.ones(len(ax), dtype=bool), np.zeros(len(ax), dtype=bool)
++        else:
++            mx, my = (ax + bx) >> 1, (ay + by) >> 1
++            split = E[my, mx] > tol_mm
++            keep = ~split
++        if keep.any():
++            lax, lay, lbx, lby, lcx, lcy = (a[keep] for a in cur)
++            inside = cells[(lay + lby + lcy) // 3, (lax + lbx + lcx) // 3]          # cellule du centre de gravité
++            if inside.any():
++                leaves.append(tuple(a[inside] for a in (lax, lay, lbx, lby, lcx, lcy)))
++        if depth < 2 * k and split.any():
++            cur = _children(*(a[split] for a in cur))
++        elif depth < 2 * k:
++            break
++    if not leaves:
++        return np.empty((0, 3, 3), dtype=np.float64)
++
++    ax, ay, bx, by, cx, cy = (np.concatenate([lf[n] for lf in leaves]) for n in range(6))
++    # orientation : normale vers +z (échange b et c quand le produit vectoriel est négatif)
++    cross = (X[bx] - X[ax]) * (Y[cy] - Y[ay]) - (Y[by] - Y[ay]) * (X[cx] - X[ax])
++    flip = cross < 0
++    bx2, by2 = np.where(flip, cx, bx), np.where(flip, cy, by)
++    cx2, cy2 = np.where(flip, bx, cx), np.where(flip, by, cy)
++    tris = np.empty((len(ax), 3, 3), dtype=np.float64)
++    for v, (px, py) in enumerate(((ax, ay), (bx2, by2), (cx2, cy2))):
++        tris[:, v, 0], tris[:, v, 1], tris[:, v, 2] = X[px], Y[py], z[py, px]
++    return tris
++
++
++def adaptive_top_triangles(quad_ok, Xmm, Ymm, z_top_mm, tol_mm, block=1024):
++    """Triangles (N, 3, 3) du dessus, normales vers +z, pour les cellules de ``quad_ok`` (H, W).
++
++    Xmm[j], Ymm[i] : coordonnées des nœuds ; z_top_mm[i, j] : altitudes des nœuds (H+1, W+1), en mm ;
++    tol_mm : tolérance verticale en mm (>= 0) ; block : côté des blocs traités séparément, en cellules
++    (puissance de deux). Voir le docstring du module."""
++    if tol_mm < 0:
++        raise ValueError("tol_mm doit être >= 0")
++    if block < 2 or block & (block - 1):
++        raise ValueError("block doit être une puissance de deux >= 2")
++    quad_ok = np.asarray(quad_ok, dtype=bool)
++    Xmm, Ymm = np.asarray(Xmm, dtype=np.float64), np.asarray(Ymm, dtype=np.float64)
++    z = np.asarray(z_top_mm, dtype=np.float64)
++    H, W = quad_ok.shape
++    out = []
++    for i0 in range(0, H, block):
++        for j0 in range(0, W, block):
++            sub = quad_ok[i0:i0 + block, j0:j0 + block]
++            if not sub.any():
++                continue
++            h, w = sub.shape
++            out.append(_rtin_block(sub, Xmm[j0:j0 + w + 1], Ymm[i0:i0 + h + 1], z[i0:i0 + h + 1, j0:j0 + w + 1], tol_mm))
++    return np.concatenate(out) if out else np.empty((0, 3, 3), dtype=np.float64)
+diff --git a/circle_dem_to_stl.py b/circle_dem_to_stl.py
+index 63932f9..c3eeba9 100644
+--- a/circle_dem_to_stl.py
++++ b/circle_dem_to_stl.py
+@@ -73,19 +73,24 @@ def available_ram_bytes():
+     return None
+ 
+ 
+-def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False):
++def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False, bottom="grid"):
+     """Estimation (grille n x n, triangles, taille STL, RAM) d'après le pas d'impression.
+     Cercle : pi*n^2 triangles ; contour : borne haute 4*n^2. Constantes mesurées sur un cas
+-    de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation."""
++    de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation. Avec un fond fusionné
++    (--bottom merged ou merged-rows), le fond ne compte plus : environ la moitié des triangles
++    (mesuré à Ø250 mm : pic de 645 Mo pour 840 Mo estimés). Avec --top adaptive, c'est une borne
++    haute (le nombre réel de triangles dépend du relief)."""
+     n = diameter_mm / spacing_mm
+     triangles = (4.0 if polygon_mode else math.pi) * n * n
++    if bottom != "grid":
++        triangles /= 2
+     return {"grid": n, "triangles": triangles, "stl_bytes": 84 + 50 * triangles,
+             "ram_bytes": RAM_BASE_BYTES + RAM_BYTES_PER_TRIANGLE * triangles}
+ 
+ 
+ def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes,
+-                    formats=("stl",)):
+-    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode)
++                    formats=("stl",), bottom="grid"):
++    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode, bottom)
+     avail = ram_available()
+     sizes = ", ".join(f"{f.upper()} ~{est['stl_bytes'] * FORMAT_SIZE_RATIO[f] / 1e6:.0f} Mo" for f in formats)
+     log(f"Estimation : grille ~{est['grid']:.0f}², ~{est['triangles'] / 1e6:.1f} M triangles, "
+@@ -260,7 +265,8 @@ def ask_float(question, default):
+ 
+ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
+                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
+-                smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None):
++                smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
++                diagonal="fixed", top="grid", top_tol_mm=0.05):
+     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
+ 
+     clip_rings = None
+@@ -333,7 +339,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
+     tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
+         elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
+         smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None),
+-        bottom=bottom, bottom_max_cells=bottom_max_cells)
++        bottom=bottom, bottom_max_cells=bottom_max_cells, diagonal=diagonal,
++        top=top, top_tol_mm=top_tol_mm)
+     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
+     return tris
+ 
+@@ -414,6 +421,18 @@ def main():
+     p.add_argument("--bottom-max-cells", type=int, default=0,
+                     help="Avec --bottom merged-rows : taille maximale, en cellules, d'un côté de rectangle "
+                          "(0 = pas de limite).")
++    p.add_argument("--diagonal", choices=mesh.DIAGONAL_MODES, default="fixed",
++                    help="Diagonale de coupe des cellules du dessus. fixed (défaut) : toujours la même. "
++                         "adaptive (PROTOTYPE) : celle qui relie les deux coins de plus faible écart "
++                         "d'altitude ; même nombre de triangles, erreur au centre des cellules réduite de 4 à "
++                         "7 %% en moyenne sur six relevés réels.")
++    p.add_argument("--top", choices=mesh.TOP_MODES, default="grid",
++                    help="Triangulation du dessus. grid (défaut) : un ou deux triangles par cellule, exacte aux "
++                         "nœuds. adaptive (PROTOTYPE) : maillage RTIN à erreur bornée, très peu de triangles là où "
++                         "le relief est lisse, bord et parois à pleine résolution.")
++    p.add_argument("--top-tol-mm", type=float, default=0.05,
++                    help="Avec --top adaptive : tolérance verticale, en mm d'impression (défaut 0,05 mm). L'écart "
++                         "entre un nœud du DEM et la surface reste de l'ordre de cette valeur (voir adaptive_top.py).")
+     p.add_argument("--sea-level", type=float, default=None,
+                     help="Mode île : remplace les pixels invalides/aberrants par un plat à cette altitude "
+                          "(m) au lieu de les exclure — le cercle est alors toujours plein.")
+@@ -516,7 +535,7 @@ def main():
+     validate_print(args)
+     paths = resolve_outputs(args)
+     check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log,
+-                    formats=tuple(paths))
++                    formats=tuple(paths), bottom=args.bottom)
+     if args.dry_run:
+         log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
+             + ", ".join(os.path.abspath(p) for p in paths.values()))
+@@ -548,6 +567,10 @@ def main():
+                 args.input, args.lat, args.lon, args.radius, args.cache_dir,
+                 product_m=args.copernicus_product, log=raster.log)
+ 
++    if args.top == "adaptive" and args.diagonal != "fixed":
++        fail("--diagonal adaptive est sans objet avec --top adaptive")
++    if args.top_tol_mm < 0:
++        fail("--top-tol-mm doit être >= 0")
+     try:
+         raster.check_readable(args.input)
+         tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
+@@ -555,7 +578,8 @@ def main():
+                           sea_level=args.sea_level, min_elevation=args.min_elevation,
+                           land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip,
+                           resample=args.resample, bottom=args.bottom,
+-                          bottom_max_cells=args.bottom_max_cells or None)
++                          bottom_max_cells=args.bottom_max_cells or None, diagonal=args.diagonal,
++                          top=args.top, top_tol_mm=args.top_tol_mm)
+     except raster.InputError as e:
+         fail(str(e))
+     except RuntimeError as e:
+diff --git a/mesh.py b/mesh.py
+index 9a1b6e7..060e47b 100644
+--- a/mesh.py
++++ b/mesh.py
+@@ -12,6 +12,7 @@ import sys
+ import numpy as np
+ from scipy import ndimage
+ 
++from adaptive_top import adaptive_top_triangles
+ from bottom import merged_bottom_triangles
+ 
+ 
+@@ -242,11 +243,14 @@ def build_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb):
+ 
+ 
+ BOTTOM_MODES = ("grid", "merged", "merged-rows")
++DIAGONAL_MODES = ("fixed", "adaptive")
++TOP_MODES = ("grid", "adaptive")
+ 
+ 
+ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev,
+                             progress=None, smooth_wall=False, circle_radius_mm=None,
+-                            bottom="grid", bottom_max_cells=None):
++                            bottom="grid", bottom_max_cells=None, diagonal="fixed",
++                            top="grid", top_tol_mm=0.05):
+     """Construit le maillage (triangles dessus/dessous/parois) à partir d'un
+     tableau d'altitudes déjà découpé et d'un masque de cellules (quad_ok)
+     déjà nettoyé. Ne touche jamais au disque ni à GDAL — testable avec de
+@@ -263,7 +267,18 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
+     bottom="merged" (PROTOTYPE) : fond plat couvert par des carrés d'un quadtree équilibré, triangulés en
+     éventail sans jonction en T (voir bottom.py) ; même géométrie, environ moitié moins de triangles au total,
+     triangles compacts. bottom="merged-rows" : couverture par rectangles gloutons (très peu de triangles mais
+-    triangles-aiguilles) ; bottom_max_cells borne alors la taille des rectangles (None : pas de borne)."""
++    triangles-aiguilles) ; bottom_max_cells borne alors la taille des rectangles (None : pas de borne).
++
++    diagonal="fixed" (défaut) : chaque cellule du dessus est coupée selon la même diagonale (c10-c01).
++    diagonal="adaptive" (PROTOTYPE) : la diagonale qui relie les deux coins de plus faible écart d'altitude
++    (c00-c11 si |z00 - z11| <= |z10 - z01|, sinon c10-c01). Même nombre de triangles, mêmes sommets, mêmes
++    parois et même fond ; seule la surface change (mesure : au centre des cellules, erreur moyenne réduite
++    de 4 à 7 % sur six relevés réels, au pire +2,5 %, voir rapport 9).
++
++    top="grid" (défaut) : un ou deux triangles par cellule, exact aux nœuds.
++    top="adaptive" (PROTOTYPE) : dessus en maillage RTIN à erreur bornée (voir adaptive_top.py) : bien moins de
++    triangles, à ``top_tol_mm`` mm de tolérance verticale ; le bord du masque reste à pleine résolution, donc
++    les parois et le fond sont inchangés. Incompatible avec diagonal="adaptive" (sans objet)."""
+     def _progress(i, n, label):
+         if progress is not None:
+             progress(i, n, label)
+@@ -281,12 +296,29 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
+         i, j = ii + di, jj + dj
+         return np.stack([Xmm[j], Ymm[i], z_top_mm[i, j]], axis=1)
+ 
+-    c00, c10, c01, c11 = corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)
+-
+-    top_tris = np.concatenate([
+-        np.stack([c00, c10, c01], axis=1),
+-        np.stack([c10, c11, c01], axis=1),
+-    ])
++    if top not in TOP_MODES:
++        raise ValueError(f"top : valeur inconnue {top!r} (choix : {', '.join(TOP_MODES)})")
++    if top == "adaptive" and diagonal != "fixed":
++        raise ValueError("diagonal='adaptive' est sans objet avec top='adaptive'")
++    if top == "grid" or bottom == "grid":
++        c00, c10, c01, c11 = corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)
++
++    if top == "adaptive":
++        top_tris = adaptive_top_triangles(quad_ok, Xmm, Ymm, z_top_mm, top_tol_mm)
++    elif diagonal == "fixed":
++        top_tris = np.concatenate([
++            np.stack([c00, c10, c01], axis=1),
++            np.stack([c10, c11, c01], axis=1),
++        ])
++    elif diagonal == "adaptive":
++        # même structure (premier triangle de chaque cellule, puis second) ; diagonale c00-c11 quand elle relie
++        # les deux coins de plus faible écart d'altitude (orientation vers +z dans les deux cas)
++        ac = np.abs(c00[:, 2] - c11[:, 2]) <= np.abs(c10[:, 2] - c01[:, 2])
++        first = np.stack([c00, c10, np.where(ac[:, None], c11, c01)], axis=1)
++        second = np.where(ac[:, None, None], np.stack([c00, c11, c01], axis=1), np.stack([c10, c11, c01], axis=1))
++        top_tris = np.concatenate([first, second])
++    else:
++        raise ValueError(f"diagonal : valeur inconnue {diagonal!r} (choix : {', '.join(DIAGONAL_MODES)})")
+ 
+     zb = -base_mm
+     if bottom == "merged":
+diff --git a/sources.py b/sources.py
+index 2496782..76aa2fb 100644
+--- a/sources.py
++++ b/sources.py
+@@ -24,6 +24,7 @@ proche plutôt que de télécharger du 1 m inutile.
+   - IGN : WMS-R Géoplateforme (annexe officielle lue), couche LiDAR HD brute
+     non confirmée sur serveur ; repli RGE ALTI.
+ """
++import email.utils
+ import http.client
+ import json
+ import math
+@@ -35,6 +36,7 @@ import urllib.parse
+ import urllib.request
+ import uuid
+ from dataclasses import dataclass
++from datetime import datetime, timezone
+ from typing import Callable, List, Tuple
+ 
+ import numpy as np
+@@ -63,14 +65,37 @@ class NoCoverage(SourceUnavailable):
+ # Utilitaires réseau / géométrie
+ # ---------------------------------------------------------------------------
+ 
++HTTP_RETRY_AFTER_MAX = 60    # secondes : plafond de l'attente demandée par un serveur (en-tête Retry-After)
++
++
++def _retry_after_seconds(value, now=None):
++    """Durée demandée par un en-tête Retry-After (secondes entières ou date HTTP), en secondes, plafonnée à
++    HTTP_RETRY_AFTER_MAX ; 0 si l'en-tête est absent ou illisible."""
++    if not value:
++        return 0.0
++    value = value.strip()
++    if value.isdigit():
++        return min(float(value), HTTP_RETRY_AFTER_MAX)
++    try:
++        when = email.utils.parsedate_to_datetime(value)
++    except (TypeError, ValueError):
++        return 0.0
++    if when.tzinfo is None:
++        when = when.replace(tzinfo=timezone.utc)
++    now = datetime.now(timezone.utc) if now is None else now
++    return min(max((when - now).total_seconds(), 0.0), HTTP_RETRY_AFTER_MAX)
++
++
+ def _http_get(url, timeout=None, retries=None):
+     """Renvoie les octets de la réponse, ou None pour un 404. Réessaie avec
+-    attente exponentielle sur erreurs transitoires ; lève SourceUnavailable
++    attente exponentielle sur erreurs transitoires (au moins la durée demandée par un en-tête
++    Retry-After sur 429 ou 503, plafonnée à HTTP_RETRY_AFTER_MAX) ; lève SourceUnavailable
+     sinon (réseau, timeout, 4xx/5xx)."""
+     timeout = HTTP_TIMEOUT if timeout is None else timeout
+     retries = HTTP_RETRIES if retries is None else retries
+     last = None
+     for attempt in range(retries):
++        retry_after = 0.0
+         try:
+             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+             with urllib.request.urlopen(req, timeout=timeout) as resp:
+@@ -85,12 +110,14 @@ def _http_get(url, timeout=None, retries=None):
+             last = f"{e}{' — ' + body if body else ''}"
+             if e.code not in (429, 500, 502, 503, 504):
+                 break
++            if e.code in (429, 503):
++                retry_after = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
+         except (OSError, http.client.HTTPException) as e:
+             # URLError, timeout, connexion coupée ; IncompleteRead (réponse tronquée) dérive de
+             # HTTPException, pas d'OSError : sans cela elle sortait brute et sans nouvelle tentative.
+             last = e
+         if attempt < retries - 1:
+-            time.sleep(min(2 ** attempt, 8))
++            time.sleep(max(min(2 ** attempt, 8), retry_after))
+     raise SourceUnavailable(f"{url} : {last}")
+ 
+ 
+diff --git a/tests/test_adaptive_top.py b/tests/test_adaptive_top.py
+new file mode 100644
+index 0000000..bad6b98
+--- /dev/null
++++ b/tests/test_adaptive_top.py
+@@ -0,0 +1,246 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Dessus adaptatif RTIN à bord forcé (--top adaptive, prototype).
++
++Propriétés vérifiées indépendamment du code de maillage : solide fermé et orienté, volume cohérent
++(théorème de la divergence contre somme des prismes), écart vertical aux nœuds du DEM borné par la
++tolérance (mesure par coordonnées barycentriques), bord du masque à pleine résolution, parois et fond
++inchangés."""
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++from scipy import ndimage
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import adaptive_top  # noqa: E402
++import check_stl  # noqa: E402
++import circle_dem_to_stl  # noqa: E402
++import mesh_export  # noqa: E402
++from test_mesh_properties import BASE, SCALE, blob, build, make_tifs  # noqa: E402
++
++
++def smooth_terrain(H, W, seed, sigma=3.0, amp=8.0):
++    rng = np.random.default_rng(seed)
++    return ndimage.gaussian_filter(rng.normal(size=(H + 1, W + 1)), sigma) * amp
++
++
++def top_of(quad, z, tol):
++    H, W = quad.shape
++    return adaptive_top.adaptive_top_triangles(quad, np.arange(W + 1, dtype=float), -np.arange(H + 1, dtype=float), z, tol)
++
++
++def max_deviation(tris, quad, z):
++    """Écart vertical maximal entre la surface (triangles du dessus) et les altitudes z, aux nœuds touchant le masque,
++    par force brute : coordonnées barycentriques de chaque nœud dans chaque triangle."""
++    H, W = quad.shape
++    cp = np.pad(quad, 1)
++    touch = (cp[:-1, :-1] | cp[:-1, 1:] | cp[1:, :-1] | cp[1:, 1:])[:H + 1, :W + 1]
++    ii, jj = np.nonzero(touch)
++    px, py = jj.astype(float), -ii.astype(float)
++    a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
++    det = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
++    worst = 0.0
++    for s in range(0, len(px), 200):
++        x, y = px[s:s + 200, None], py[s:s + 200, None]
++        l1 = ((b[:, 1] - c[:, 1]) * (x - c[:, 0]) + (c[:, 0] - b[:, 0]) * (y - c[:, 1])) / det
++        l2 = ((c[:, 1] - a[:, 1]) * (x - c[:, 0]) + (a[:, 0] - c[:, 0]) * (y - c[:, 1])) / det
++        l3 = 1.0 - l1 - l2
++        inside = (l1 >= -1e-9) & (l2 >= -1e-9) & (l3 >= -1e-9)
++        assert inside.any(axis=1).all(), "un nœud du masque n'est couvert par aucun triangle du dessus"
++        zhat = np.where(inside, l1 * a[:, 2] + l2 * b[:, 2] + l3 * c[:, 2], np.nan)
++        zhat = np.nanmax(zhat, axis=1) if False else np.array([row[~np.isnan(row)][0] for row in zhat])
++        worst = max(worst, float(np.abs(zhat - z[ii[s:s + 200], jj[s:s + 200]]).max()))
++    return worst
++
++
++def prism_volume(top_tris):
++    """∫ (z + BASE) dA sur les triangles du dessus : somme des prismes, sans la divergence."""
++    a, b, c = top_tris[:, 0], top_tris[:, 1], top_tris[:, 2]
++    area = 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
++    return float(np.sum(area * ((a[:, 2] + b[:, 2] + c[:, 2]) / 3.0 + BASE)))
++
++
++# --- solide fermé, orienté, de volume cohérent -------------------------------------------------------
++
++@pytest.mark.parametrize("bottom", ["grid", "merged"])
++@pytest.mark.parametrize("tol", [0.0, 0.05, 0.5, 5.0, 1e9])
++@pytest.mark.parametrize("seed", range(6))
++def test_adaptive_top_gives_a_closed_oriented_solid_with_consistent_volume(seed, tol, bottom):
++    mask = blob(seed, keep=0.4 + 0.04 * seed)
++    tris, elev, quad_ok, xs, ys, min_e, (nt, nb, nw) = build(mask, seed=seed, top="adaptive", top_tol_mm=tol, bottom=bottom)
++    rep = check_stl.edge_report(tris)
++    assert rep["boundary_edges"] == 0 and rep["nonmanifold_edges"] == 0 and rep["duplicate_directed_edges"] == 0, rep
++    assert check_stl.signed_volume(tris) == pytest.approx(prism_volume(tris[:nt]), rel=1e-9)
++    assert check_stl.degenerate_count(tris) == 0
++
++
++@pytest.mark.parametrize("seed", range(6))
++def test_walls_and_bottom_are_unchanged(seed):
++    mask = blob(seed, keep=0.5)
++    grid, *_a, (gt, gb, gw) = build(mask, seed=seed)
++    adapt, *_b, (at, ab, aw) = build(mask, seed=seed, top="adaptive", top_tol_mm=0.5)
++    assert (gb, gw) == (ab, aw) and np.array_equal(grid[gt:], adapt[at:])
++
++
++def test_special_masks_and_shapes():
++    cases = {
++        "anneau": np.pad(np.pad(np.zeros((6, 6), bool), 3, constant_values=True), 2),
++        "deux îles": np.pad(np.block([[np.ones((8, 8), bool), np.zeros((8, 5), bool), np.ones((8, 9), bool)]]), 3),
++        "pincement": np.pad(np.block([[np.ones((6, 6), bool), np.zeros((6, 6), bool)], [np.zeros((6, 6), bool), np.ones((6, 6), bool)]]), 2),
++        "non carré 17x45": np.pad(np.ones((11, 39), bool), 3),
++        "une cellule": np.pad(np.ones((1, 1), bool), 2),
++        "2x3 cellules": np.ones((2, 3), bool),
++    }
++    for name, mask in cases.items():
++        tris, *_ = build(mask, top="adaptive", top_tol_mm=0.5)
++        rep = check_stl.edge_report(tris)
++        assert rep["boundary_edges"] == 0 and rep["nonmanifold_edges"] == 0 and rep["duplicate_directed_edges"] == 0, name
++
++
++# --- bord à pleine résolution et erreur bornée -------------------------------------------------------
++
++def test_every_node_on_the_mask_boundary_is_a_vertex_and_every_boundary_cell_is_two_half_cells():
++    mask = blob(3, n=40, keep=0.55)
++    z = smooth_terrain(*mask.shape, 3)
++    tris = top_of(mask, z, 1e9)                                         # tolérance énorme : rien n'est simplifié sauf le plat
++    verts = {(int(round(x)), int(round(-y))) for x, y in tris[:, :, :2].reshape(-1, 2)}
++    cp = np.pad(mask, 1)
++    for i in range(mask.shape[0] + 1):
++        for j in range(mask.shape[1] + 1):
++            around = [cp[i, j], cp[i, j + 1], cp[i + 1, j], cp[i + 1, j + 1]]
++            if any(around) and not all(around):
++                assert (j, i) in verts, f"nœud de bord ({i}, {j}) absent du dessus"
++    area = 0.5 * np.abs(np.cross(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
++    assert area.sum() == pytest.approx(mask.sum())                      # les triangles couvrent exactement le masque
++
++
++def test_zero_tolerance_keeps_the_full_resolution_on_noisy_terrain():
++    mask = blob(2, n=36, keep=0.6)
++    z = np.random.default_rng(7).normal(size=(mask.shape[0] + 1, mask.shape[1] + 1))
++    tris = top_of(mask, z, 0.0)
++    assert len(tris) == 2 * mask.sum() and max_deviation(tris, mask, z) < 1e-9
++
++
++@pytest.mark.parametrize("sigma,tol", [(2.0, 0.02), (3.0, 0.05), (4.0, 0.2), (1.5, 0.5)])
++@pytest.mark.parametrize("seed", range(3))
++def test_vertical_deviation_at_the_nodes_stays_within_twice_the_tolerance(seed, sigma, tol):
++    mask = blob(seed, n=33, keep=0.7)
++    z = smooth_terrain(*mask.shape, seed, sigma=sigma, amp=6.0)
++    tris = top_of(mask, z, tol)
++    assert len(tris) < 2 * mask.sum()
++    assert max_deviation(tris, mask, z) <= 2.0 * tol + 1e-9             # mesuré : environ 1,5 à 1,8 fois la tolérance
++
++
++def test_smooth_terrain_loses_most_of_its_triangles_and_rough_terrain_does_not():
++    mask = np.pad(np.ones((60, 60), bool), 2)
++    smooth = smooth_terrain(*mask.shape, 1, sigma=6.0, amp=3.0)
++    rough = np.random.default_rng(1).normal(size=smooth.shape) * 3.0
++    assert len(top_of(mask, smooth, 0.1)) < 0.25 * 2 * mask.sum()
++    assert len(top_of(mask, rough, 0.1)) > 0.9 * 2 * mask.sum()
++
++
++def test_a_plane_collapses_to_the_boundary_only():
++    mask = np.pad(np.ones((32, 32), bool), 0)
++    ii, jj = np.mgrid[0:33, 0:33]
++    z = 0.3 * ii + 0.7 * jj
++    tris = top_of(mask, z, 1e-9)
++    assert len(tris) < 2 * mask.sum() * 0.25 and max_deviation(tris, mask, z) < 1e-9
++
++
++# --- arguments ---------------------------------------------------------------------------------------
++
++def test_negative_tolerance_and_unknown_or_conflicting_modes_are_refused():
++    mask = np.ones((4, 4), bool)
++    with pytest.raises(ValueError):
++        top_of(mask, np.zeros((5, 5)), -1.0)
++    with pytest.raises(ValueError, match="top"):
++        build(blob(1), top="tin")
++    with pytest.raises(ValueError, match="sans objet"):
++        build(blob(1), top="adaptive", diagonal="adaptive")
++
++
++def test_empty_result_when_the_mask_has_no_cell():
++    assert top_of(np.zeros((4, 4), bool), np.zeros((5, 5)), 0.1).shape == (0, 3, 3)
++
++
++# --- de bout en bout (CLI, trois formats) -------------------------------------------------------------
++
++@pytest.mark.parametrize("ext", ["stl", "3mf", "obj"])
++def test_cli_top_adaptive_produces_a_valid_smaller_file(monkeypatch, tmp_path, capsys, ext):
++    a, _ = make_tifs(tmp_path)
++
++    def run(out, *extra):
++        monkeypatch.chdir(tmp_path)
++        monkeypatch.setattr(sys, "argv", ["x", "--input", a, "--cx", "2601000", "--cy", "1201000", "--radius", "800",
++                                          "--diameter-mm", "60", "--vexag", "1", "--base-mm", "2",
++                                          "--print-spacing-mm", "0.4", "--output", str(out), *extra])
++        circle_dem_to_stl.main()
++        capsys.readouterr()
++        return mesh_export.read_triangles(str(out))
++
++    grid = run(tmp_path / f"g.{ext}")
++    adapt = run(tmp_path / f"a.{ext}", "--top", "adaptive", "--top-tol-mm", "0.1")
++    assert len(adapt) < len(grid)
++    res = {n: ok for n, ok, _ in check_stl.check(adapt, 60.0, 2.0, tol_mm=1.0)}
++    assert all(res.values()), res
++
++
++def test_cli_refuses_the_two_adaptive_options_together(monkeypatch, tmp_path):
++    a, _ = make_tifs(tmp_path)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(sys, "argv", ["x", "--input", a, "--cx", "2601000", "--cy", "1201000", "--radius", "800",
++                                      "--diameter-mm", "60", "--vexag", "1", "--base-mm", "2",
++                                      "--print-spacing-mm", "0.4", "--output", str(tmp_path / "o.stl"),
++                                      "--top", "adaptive", "--diagonal", "adaptive"])
++    with pytest.raises(SystemExit) as e:
++        circle_dem_to_stl.main()
++    assert "sans objet" in str(e.value) or e.value.code not in (0, None)
++
++
++# --- découpage en blocs (mémoire bornée) ---------------------------------------------------------------
++
++@pytest.mark.parametrize("block", [2, 4, 8, 16, 32, 1024])
++@pytest.mark.parametrize("seed", range(3))
++def test_blocks_keep_the_solid_closed_and_the_deviation_bounded(seed, block):
++    mask = blob(seed, n=37, keep=0.65)                         # 37 n'est pas un multiple des blocs : blocs partiels
++    z = smooth_terrain(*mask.shape, seed, sigma=2.5, amp=6.0)
++    tol = 0.1
++    tris = adaptive_top.adaptive_top_triangles(mask, np.arange(mask.shape[1] + 1, dtype=float),
++                                               -np.arange(mask.shape[0] + 1, dtype=float), z, tol, block=block)
++    area = 0.5 * np.abs(np.cross(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
++    assert area.sum() == pytest.approx(mask.sum())              # couverture exacte du masque, sans recouvrement
++    assert max_deviation(tris, mask, z) <= 2.0 * tol + 1e-9
++    # étanchéité de la seule surface : chaque arête intérieure est partagée par deux triangles, sans fissure
++    v, f = mesh_export.index_mesh(tris)
++    edges = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
++    uniq, counts = np.unique(edges, axis=0, return_counts=True)
++    assert counts.max() <= 2                                    # jamais plus de deux triangles par arête
++    cp = np.pad(mask, 1)                                        # arêtes de bord attendues : celles du masque
++    n_boundary = int(np.sum(cp[1:-1, 1:-1] & ~cp[:-2, 1:-1]) + np.sum(cp[1:-1, 1:-1] & ~cp[2:, 1:-1])
++                     + np.sum(cp[1:-1, 1:-1] & ~cp[1:-1, :-2]) + np.sum(cp[1:-1, 1:-1] & ~cp[1:-1, 2:]))
++    assert int((counts == 1).sum()) == n_boundary
++
++
++def test_smaller_blocks_cost_a_strip_of_triangles_along_the_seams_only():
++    mask = np.ones((64, 64), bool)
++    z = smooth_terrain(64, 64, 5, sigma=8.0, amp=2.0)
++    one = top_of(mask, z, 0.2)
++    many = adaptive_top.adaptive_top_triangles(mask, np.arange(65, dtype=float), -np.arange(65, dtype=float), z, 0.2, block=16)
++    assert len(many) > len(one)                                 # les jonctions coûtent des triangles
++    seam_nodes = 2 * (64 // 16 - 1) * 64                         # longueur totale des jonctions, en nœuds
++    assert len(many) < len(one) + 8 * seam_nodes                # mesuré : environ 5 triangles par nœud de jonction
++
++
++def test_blocks_must_be_a_power_of_two():
++    for bad in (0, 1, 3, 12, 1000):
++        with pytest.raises(ValueError, match="puissance de deux"):
++            adaptive_top.adaptive_top_triangles(np.ones((4, 4), bool), np.arange(5.0), np.arange(5.0), np.zeros((5, 5)), 0.1, block=bad)
++
++
++def test_blocks_with_no_cell_are_skipped():
++    mask = np.zeros((40, 40), bool)
++    mask[1:5, 1:5] = True                                       # un seul bloc de 16 contient des cellules
++    z = np.zeros((41, 41))
++    tris = adaptive_top.adaptive_top_triangles(mask, np.arange(41.0), -np.arange(41.0), z, 0.1, block=16)
++    assert len(tris) > 0 and tris[:, :, 0].max() <= 5 and tris[:, :, 1].min() >= -5
+diff --git a/tests/test_bottom_merged.py b/tests/test_bottom_merged.py
+index fe29241..81c10aa 100644
+--- a/tests/test_bottom_merged.py
++++ b/tests/test_bottom_merged.py
+@@ -219,3 +219,23 @@ def test_cli_default_is_still_the_grid_bottom(monkeypatch, tmp_path, capsys):
+     default = _run(monkeypatch, tmp_path, capsys, tmp_path / "d.stl")
+     explicit = _run(monkeypatch, tmp_path, capsys, tmp_path / "e.stl", "--bottom", "grid")
+     assert np.array_equal(default, explicit)
++
++
++# --- garde-fou de ressources --------------------------------------------------------------------------
++
++def test_resource_estimate_halves_the_triangles_with_a_merged_bottom():
++    grid = circle_dem_to_stl.estimate_resources(250.0, 0.2)
++    for mode in ("merged", "merged-rows"):
++        merged = circle_dem_to_stl.estimate_resources(250.0, 0.2, bottom=mode)
++        assert merged["triangles"] == pytest.approx(grid["triangles"] / 2)
++        assert merged["ram_bytes"] < grid["ram_bytes"]
++    assert circle_dem_to_stl.estimate_resources(250.0, 0.2, bottom="grid") == grid
++
++
++def test_a_machine_that_cannot_run_the_grid_bottom_can_run_the_merged_bottom():
++    # Ø250 mm à 0,1 mm : mesuré 2,2 Go de pic avec le fond fusionné ; le fond cellule par cellule en demande plus de 4
++    ram = lambda: 3_700_000_000  # noqa: E731
++    quiet = lambda *a, **k: None  # noqa: E731
++    with pytest.raises(SystemExit):
++        circle_dem_to_stl.check_resources(250.0, 0.1, False, False, log=quiet, ram_available=ram, bottom="grid")
++    circle_dem_to_stl.check_resources(250.0, 0.1, False, False, log=quiet, ram_available=ram, bottom="merged")
+diff --git a/tests/test_diagonal_adaptive.py b/tests/test_diagonal_adaptive.py
+new file mode 100644
+index 0000000..77e1dd9
+--- /dev/null
++++ b/tests/test_diagonal_adaptive.py
+@@ -0,0 +1,135 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Diagonale adaptative du dessus (--diagonal adaptive, prototype).
++
++Seule la surface change : même nombre de triangles, mêmes sommets, mêmes parois et même fond que la
++diagonale fixe ; le solide reste fermé, orienté, et son volume est celui que donne la règle appliquée
++cellule par cellule (oracle écrit ici, indépendant de mesh.py)."""
++import sys
++from pathlib import Path
++
++import numpy as np
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import check_stl  # noqa: E402
++import circle_dem_to_stl  # noqa: E402
++import mesh  # noqa: E402
++import mesh_export  # noqa: E402
++from test_mesh_properties import BASE, SCALE, assert_solid, blob, build, make_tifs  # noqa: E402
++
++
++def adaptive_expected_volume(elev, quad_ok, xs, ys, min_e, vexag):
++    ii, jj = np.nonzero(quad_ok)
++    z = lambda di, dj: (elev[ii + di, jj + dj] - min_e) * SCALE * vexag  # noqa: E731
++    area = np.abs((xs[1] - xs[0]) * (ys[1] - ys[0])) * SCALE * SCALE
++    z00, z10, z01, z11 = z(0, 0), z(1, 0), z(0, 1), z(1, 1)
++    ac = np.abs(z00 - z11) <= np.abs(z10 - z01)
++    v_ac = area / 6 * (2 * z00 + z10 + 2 * z11 + z01)          # diagonale c00-c11 : deux triangles de aire/2
++    v_bd = area / 6 * (z00 + 2 * z10 + z11 + 2 * z01)          # diagonale c10-c01
++    return float(np.sum(np.where(ac, v_ac, v_bd)) + area * len(ii) * BASE)
++
++
++def _assert_adaptive_solid(tris, elev, quad_ok, xs, ys, min_e, vexag=1.0):
++    rep = check_stl.edge_report(tris)
++    assert rep["boundary_edges"] == 0 and rep["nonmanifold_edges"] == 0 and rep["duplicate_directed_edges"] == 0, rep
++    v, f = mesh_export.index_mesh(tris)
++    assert mesh_export.signed_volume(v, f) == pytest.approx(
++        adaptive_expected_volume(elev, quad_ok, xs, ys, min_e, vexag), rel=1e-4)
++
++
++@pytest.mark.parametrize("bottom", ["grid", "merged"])
++@pytest.mark.parametrize("seed", range(14))
++def test_adaptive_diagonal_gives_a_closed_oriented_solid_with_the_expected_volume(bottom, seed):
++    mask = blob(seed, keep=0.4 + 0.03 * (seed % 6))
++    vexag = 1.0 + seed % 3
++    tris, elev, quad_ok, xs, ys, min_e, _ = build(mask, vexag=vexag, seed=seed, diagonal="adaptive", bottom=bottom)
++    _assert_adaptive_solid(tris, elev, quad_ok, xs, ys, min_e, vexag)
++
++
++@pytest.mark.parametrize("seed", range(6))
++def test_only_the_top_surface_changes(seed):
++    mask = blob(seed, keep=0.5)
++    fixed, *_a, (ft, fb, fw) = build(mask, seed=seed)
++    adapt, *_b, (at, ab, aw) = build(mask, seed=seed, diagonal="adaptive")
++    assert (ft, fb, fw) == (at, ab, aw)                                       # mêmes nombres de triangles
++    assert np.array_equal(fixed[ft:], adapt[at:])                             # fond et parois identiques
++    assert not np.array_equal(fixed[:ft], adapt[:at])                         # la surface, elle, change
++    key = lambda t: {tuple(p) for tri in t for p in tri}                     # noqa: E731
++    assert key(fixed[:ft]) == key(adapt[:at])                                 # mêmes sommets
++
++
++def test_fixed_is_still_the_default_and_unchanged():
++    mask = blob(4, keep=0.5)
++    default, *_ = build(mask, seed=4)
++    explicit, *_ = build(mask, seed=4, diagonal="fixed")
++    assert np.array_equal(default, explicit)
++
++
++def _one_cell(z00, z10, z01, z11):
++    elev = np.array([[z00, z01], [z10, z11]], dtype=float)
++    mask = np.ones((1, 1), bool)
++    tris, *_ = mesh.build_mesh_from_arrays(elev, mask, np.array([0.0, 1.0]), np.array([0.0, -1.0]), 1.0, 1.0, 1.0,
++                                           0.0, diagonal="adaptive")             # min_elev = 0 : altitudes inchangées
++    return tris[:2]                                                           # les deux triangles du dessus
++
++
++def _has_edge(tris, p, q):
++    inside = [{tuple(v) for v in t} for t in tris]
++    return all(p in s and q in s for s in inside)
++
++
++def test_the_diagonal_joins_the_two_corners_with_the_smaller_height_difference():
++    # |z00 - z11| = 1 < |z10 - z01| = 8 : diagonale c00-c11, soit les nœuds (0, 0) et (1, -1)
++    t = _one_cell(z00=10, z10=2, z01=18, z11=11)
++    assert _has_edge(t, (0.0, 0.0, 10.0), (1.0, -1.0, 11.0))
++    # |z00 - z11| = 8 > |z10 - z01| = 1 : diagonale c10-c01 (celle de l'ancien code)
++    t = _one_cell(z00=10, z10=2, z01=3, z11=18)
++    assert _has_edge(t, (0.0, -1.0, 2.0), (1.0, 0.0, 3.0))
++
++
++def test_a_tie_keeps_the_c00_c11_diagonal_and_a_flat_cell_is_valid():
++    t = _one_cell(z00=5, z10=5, z01=5, z11=5)
++    assert _has_edge(t, (0.0, 0.0, 5.0), (1.0, -1.0, 5.0))
++    assert np.all(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])[:, 2] > 0)    # normales vers +z
++
++
++def test_adaptive_triangles_face_up():
++    mask = blob(2, keep=0.55)
++    tris, *_rest, (nt, nb, nw) = build(mask, diagonal="adaptive")
++    top = tris[:nt]
++    assert np.all(np.cross(top[:, 1] - top[:, 0], top[:, 2] - top[:, 0])[:, 2] > 0)
++
++
++def test_unknown_diagonal_mode_is_refused():
++    with pytest.raises(ValueError, match="diagonal"):
++        build(blob(1), diagonal="zigzag")
++
++
++def test_adaptive_diagonal_with_smooth_wall_is_closed():
++    n = 61
++    yy, xx = np.mgrid[0:n, 0:n]
++    mask = (xx - 30) ** 2 + (yy - 30) ** 2 <= 29 ** 2
++    tris, *_ = build(mask, diagonal="adaptive", smooth_wall=True, circle_radius_mm=29 * SCALE)
++    rep = check_stl.edge_report(tris)
++    assert rep["boundary_edges"] == 0 and rep["nonmanifold_edges"] == 0 and rep["duplicate_directed_edges"] == 0
++
++
++@pytest.mark.parametrize("ext", ["stl", "3mf", "obj"])
++def test_cli_adaptive_diagonal_produces_a_valid_file(monkeypatch, tmp_path, capsys, ext):
++    a, _ = make_tifs(tmp_path)
++
++    def run(out, *extra):
++        monkeypatch.chdir(tmp_path)
++        monkeypatch.setattr(sys, "argv", ["x", "--input", a, "--cx", "2601000", "--cy", "1201000", "--radius", "800",
++                                          "--diameter-mm", "60", "--vexag", "1", "--base-mm", "2",
++                                          "--print-spacing-mm", "0.5", "--output", str(out), *extra])
++        circle_dem_to_stl.main()
++        capsys.readouterr()
++        return mesh_export.read_triangles(str(out))
++
++    fixed = run(tmp_path / f"f.{ext}")
++    adapt = run(tmp_path / f"a.{ext}", "--diagonal", "adaptive")
++    assert len(adapt) == len(fixed)
++    res = {n: ok for n, ok, _ in check_stl.check(adapt, 60.0, 2.0, tol_mm=1.0)}
++    assert all(res.values()), res
++    assert not np.array_equal(np.sort(fixed.reshape(len(fixed), -1), axis=0), np.sort(adapt.reshape(len(adapt), -1), axis=0))
+diff --git a/tests/test_retry_after.py b/tests/test_retry_after.py
+new file mode 100644
+index 0000000..a9cfeb7
+--- /dev/null
++++ b/tests/test_retry_after.py
+@@ -0,0 +1,113 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Retry-After : sur 429 et 503, on attend au moins la durée demandée par le serveur (plafonnée)."""
++import email.utils
++import http.server
++import socketserver
++import sys
++import threading
++import time
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++import sources  # noqa: E402
++
++
++@pytest.fixture
++def server():
++    """Serveur local : state['script'] liste des réponses (code, valeur de Retry-After ou None), la dernière est répétée."""
++    state = {"script": [(200, None)], "hits": 0}
++
++    class Handler(http.server.BaseHTTPRequestHandler):
++        protocol_version = "HTTP/1.1"
++
++        def log_message(self, *a):
++            pass
++
++        def do_GET(self):
++            code, ra = state["script"][min(state["hits"], len(state["script"]) - 1)]
++            state["hits"] += 1
++            body = b"ok" if code == 200 else b"trop de requetes"
++            self.send_response(code)
++            if ra is not None:
++                self.send_header("Retry-After", ra)
++            self.send_header("Content-Length", str(len(body)))
++            self.end_headers()
++            self.wfile.write(body)
++
++    srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    state["url"] = f"http://127.0.0.1:{srv.server_address[1]}/x"
++    yield state
++    srv.shutdown()
++    srv.server_close()
++
++
++@pytest.fixture
++def sleeps(monkeypatch):
++    calls = []
++    monkeypatch.setattr(sources.time, "sleep", lambda s: calls.append(s))
++    return calls
++
++
++def test_waits_at_least_the_retry_after_given_in_seconds(server, sleeps):
++    server["script"] = [(429, "7"), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [7.0]
++
++
++def test_503_is_treated_like_429(server, sleeps):
++    server["script"] = [(503, "3"), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [3.0]
++
++
++def test_without_retry_after_the_exponential_backoff_is_unchanged(server, sleeps):
++    server["script"] = [(429, None), (429, None), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [1, 2]
++
++
++def test_a_short_retry_after_does_not_shorten_the_backoff(server, sleeps):
++    server["script"] = [(429, "0"), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [1]
++
++
++def test_the_wait_is_capped(server, sleeps):
++    server["script"] = [(429, "86400"), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [float(sources.HTTP_RETRY_AFTER_MAX)]
++
++
++def test_http_date_format(server, sleeps):
++    when = email.utils.format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10), usegmt=True)
++    server["script"] = [(429, when), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and 8.0 <= sleeps[0] <= 10.0
++
++
++def test_unreadable_retry_after_falls_back_to_the_backoff(server, sleeps):
++    server["script"] = [(429, "bientôt".encode("utf-8").decode("latin-1")), (200, None)]
++    assert sources._http_get(server["url"]) == b"ok" and sleeps == [1]
++
++
++def test_persistent_429_ends_in_source_unavailable_after_all_attempts(server, sleeps):
++    server["script"] = [(429, "2")]
++    with pytest.raises(sources.SourceUnavailable):
++        sources._http_get(server["url"])
++    assert server["hits"] == sources.HTTP_RETRIES and sleeps == [2.0] * (sources.HTTP_RETRIES - 1)
++
++
++def test_404_is_still_none_without_waiting(server, sleeps):
++    server["script"] = [(404, "9")]
++    assert sources._http_get(server["url"]) is None and sleeps == []
++
++
++@pytest.mark.parametrize("value,expected", [(None, 0.0), ("", 0.0), ("5", 5.0), (" 12 ", 12.0), ("-3", 0.0), ("abc", 0.0), ("999999", 60.0)])
++def test_retry_after_parsing(value, expected):
++    assert sources._retry_after_seconds(value) == expected
++
++
++def test_past_http_date_means_no_extra_wait():
++    now = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
++    past = email.utils.format_datetime(now - timedelta(seconds=30), usegmt=True)
++    future = email.utils.format_datetime(now + timedelta(seconds=15), usegmt=True)
++    assert sources._retry_after_seconds(past, now=now) == 0.0
++    assert sources._retry_after_seconds(future, now=now) == 15.0

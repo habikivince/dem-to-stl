@@ -70,15 +70,36 @@ def _positional(x):
     return np.format_float_positional(np.float32(x), unique=True, trim="-")
 
 
+def _positional_lines(block, fmt):
+    """Lignes de sommets avec les coordonnées écrites par ``_positional`` (sans exposant, plus court
+    texte qui relit le même float32). Chaque valeur DISTINCTE n'est formatée qu'une fois : sur une grille
+    régulière, x et y n'ont que quelques centaines de valeurs distinctes pour des millions de sommets.
+    Le résultat est identique, caractère pour caractère, à un formatage valeur par valeur."""
+    block = np.ascontiguousarray(block, dtype=np.float32)
+    columns = []
+    for k in range(3):
+        col = np.ascontiguousarray(block[:, k])
+        # unicité sur les bits : -0.0 et 0.0 restent distincts (« -0 » et « 0 »)
+        _, first, inverse = np.unique(col.view(np.uint32), return_index=True, return_inverse=True)
+        strings = np.array([_positional(col[i]) for i in first], dtype=object)
+        columns.append(strings[inverse.reshape(-1)].tolist())
+    plain = fmt.replace("%.9g", "%s")
+    return "".join(plain % row for row in zip(*columns))
+
+
 def _vertex_lines(vertices, fmt):
     """Coordonnées en %.9g : 9 chiffres significatifs suffisent pour relire exactement un float32,
     donc la même géométrie que le STL. Les rares valeurs notées avec exposant (|x| < 1e-4)
-    sont réécrites sans exposant."""
+    sont réécrites sans exposant.
+
+    Remarque : le test ``"e" in text`` est aussi vrai quand le gabarit contient la lettre « e »
+    (``<vertex …>`` du 3MF) : la voie sans exposant est alors toujours utilisée, ce qui donne les
+    valeurs les plus courtes (« 12.4 » plutôt que « 12.3999996 »). Ce comportement est conservé."""
     for s in range(0, len(vertices), CHUNK):
-        block = vertices[s:s + CHUNK].astype(np.float64).tolist()
-        text = "".join(fmt % (x, y, z) for x, y, z in block)
+        block = vertices[s:s + CHUNK].astype(np.float64)
+        text = "".join(fmt % (x, y, z) for x, y, z in block.tolist())
         if "e" in text:
-            text = "".join(fmt.replace("%.9g", "%s") % tuple(_positional(c) for c in row) for row in block)
+            text = _positional_lines(block, fmt)
         yield text
 
 

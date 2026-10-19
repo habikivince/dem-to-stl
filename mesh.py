@@ -12,6 +12,9 @@ import sys
 import numpy as np
 from scipy import ndimage
 
+from adaptive_top import adaptive_top_triangles
+from bottom import merged_bottom_triangles
+
 
 def trace_boundary_loop(quad_ok):
     """Trace la boucle fermée simple formant le contour du masque de
@@ -161,14 +164,20 @@ def dilate3x3(m):
     return out
 
 
-def fix_diagonal_pinches(quad_ok, max_iterations=4):
+def fix_diagonal_pinches(quad_ok, max_iterations=None):
     """Élimine les pincements en diagonale : deux cellules incluses qui ne se
     touchent que par un coin (motif "damier" sur un bloc 2x2) créent un
     sommet où deux nappes de surface se rejoignent en un point unique —
     épaisseur quasi nulle, indétectable par un simple test d'étanchéité par
     arêtes. On comble les deux cases manquantes plutôt que de retirer de
-    la matière. Modifie quad_ok sur place et le retourne."""
-    for _ in range(max_iterations):
+    la matière. Modifie quad_ok sur place et le retourne.
+
+    Le comblement peut créer de nouveaux pincements voisins : on itère donc
+    jusqu'à stabilité. Il ne fait qu'ajouter des cellules (monotone), donc la
+    boucle termine en au plus quad_ok.size passes. ``max_iterations`` reste
+    un plafond optionnel (None = jusqu'à stabilité)."""
+    limit = quad_ok.size if max_iterations is None else max_iterations
+    for _ in range(limit):
         diag1 = quad_ok[:-1, :-1] & quad_ok[1:, 1:] & ~quad_ok[:-1, 1:] & ~quad_ok[1:, :-1]
         diag2 = quad_ok[:-1, 1:] & quad_ok[1:, :-1] & ~quad_ok[:-1, :-1] & ~quad_ok[1:, 1:]
         if not (diag1.any() or diag2.any()):
@@ -201,8 +210,47 @@ def largest_connected_component(seed_mask):
     return labeled == largest_label, n_components, sizes
 
 
+def build_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb):
+    """Parois verticales sur tout le bord du masque (deux triangles par arête de cellule), sans boucle Python.
+
+    Même résultat, dans le même ordre, que l'ancienne double boucle sur tous les nœuds : d'abord les arêtes
+    verticales (ligne par ligne), puis les arêtes horizontales (colonne par colonne). Une arête de bord sépare
+    une cellule incluse d'une cellule exclue ou hors grille ; la paroi est orientée vers l'extérieur."""
+    H1, W1 = quad_ok.shape
+    cols = np.pad(quad_ok, ((0, 0), (1, 1)))                     # (H1, W1 + 2)
+    left, right = cols[:, :-1], cols[:, 1:]                        # côtés gauche et droit de chaque arête verticale
+    iv, jv = np.nonzero(left != right)                             # ordre : ligne puis colonne, comme la boucle
+    rows = np.pad(quad_ok, ((1, 1), (0, 0)))                     # (H1 + 2, W1)
+    up, down = rows[:-1, :], rows[1:, :]                           # côtés haut et bas de chaque arête horizontale
+    jh, ih = np.nonzero((up != down).T)                            # ordre : colonne puis ligne, comme la boucle
+
+    def walls(p1, p2, outward):
+        n = len(p1)
+        p1b, p2b = p1.copy(), p2.copy()
+        p1b[:, 2] = zb
+        p2b[:, 2] = zb
+        out = np.empty((n, 2, 3, 3), dtype=np.float64)
+        o = outward[:, None, None]
+        out[:, 0] = np.where(o, np.stack([p1, p2, p1b], axis=1), np.stack([p2, p1, p1b], axis=1))
+        out[:, 1] = np.where(o, np.stack([p2, p2b, p1b], axis=1), np.stack([p2b, p2, p1b], axis=1))
+        return out.reshape(-1, 3, 3)
+
+    p1v = np.stack([Xmm[jv], Ymm[iv], z_top_mm[iv, jv]], axis=1)
+    p2v = np.stack([Xmm[jv], Ymm[iv + 1], z_top_mm[iv + 1, jv]], axis=1)
+    p1h = np.stack([Xmm[jh], Ymm[ih], z_top_mm[ih, jh]], axis=1)
+    p2h = np.stack([Xmm[jh + 1], Ymm[ih], z_top_mm[ih, jh + 1]], axis=1)
+    return np.concatenate([walls(p1v, p2v, left[iv, jv]), walls(p1h, p2h, down[ih, jh])])
+
+
+BOTTOM_MODES = ("grid", "merged", "merged-rows")
+DIAGONAL_MODES = ("fixed", "adaptive")
+TOP_MODES = ("grid", "adaptive")
+
+
 def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev,
-                            progress=None, smooth_wall=False, circle_radius_mm=None):
+                            progress=None, smooth_wall=False, circle_radius_mm=None,
+                            bottom="grid", bottom_max_cells=None, diagonal="fixed",
+                            top="grid", top_tol_mm=0.05):
     """Construit le maillage (triangles dessus/dessous/parois) à partir d'un
     tableau d'altitudes déjà découpé et d'un masque de cellules (quad_ok)
     déjà nettoyé. Ne touche jamais au disque ni à GDAL — testable avec de
@@ -213,7 +261,24 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
     smooth_wall=True : au lieu de suivre le contour en escalier du masque,
     chaque point du contour est projeté radialement vers le vrai cercle
     (même altitude), formant un bord parfaitement circulaire. Requiert un
-    masque à un seul contour simple (voir trace_boundary_loop)."""
+    masque à un seul contour simple (voir trace_boundary_loop).
+
+    bottom="grid" (défaut) : fond triangulé cellule par cellule (comme le dessus).
+    bottom="merged" (PROTOTYPE) : fond plat couvert par des carrés d'un quadtree équilibré, triangulés en
+    éventail sans jonction en T (voir bottom.py) ; même géométrie, environ moitié moins de triangles au total,
+    triangles compacts. bottom="merged-rows" : couverture par rectangles gloutons (très peu de triangles mais
+    triangles-aiguilles) ; bottom_max_cells borne alors la taille des rectangles (None : pas de borne).
+
+    diagonal="fixed" (défaut) : chaque cellule du dessus est coupée selon la même diagonale (c10-c01).
+    diagonal="adaptive" (PROTOTYPE) : la diagonale qui relie les deux coins de plus faible écart d'altitude
+    (c00-c11 si |z00 - z11| <= |z10 - z01|, sinon c10-c01). Même nombre de triangles, mêmes sommets, mêmes
+    parois et même fond ; seule la surface change (mesure : au centre des cellules, erreur moyenne réduite
+    de 4 à 7 % sur six relevés réels, au pire +2,5 %, voir rapport 9).
+
+    top="grid" (défaut) : un ou deux triangles par cellule, exact aux nœuds.
+    top="adaptive" (PROTOTYPE) : dessus en maillage RTIN à erreur bornée (voir adaptive_top.py) : bien moins de
+    triangles, à ``top_tol_mm`` mm de tolérance verticale ; le bord du masque reste à pleine résolution, donc
+    les parois et le fond sont inchangés. Incompatible avec diagonal="adaptive" (sans objet)."""
     def _progress(i, n, label):
         if progress is not None:
             progress(i, n, label)
@@ -231,22 +296,46 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
         i, j = ii + di, jj + dj
         return np.stack([Xmm[j], Ymm[i], z_top_mm[i, j]], axis=1)
 
-    c00, c10, c01, c11 = corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)
+    if top not in TOP_MODES:
+        raise ValueError(f"top : valeur inconnue {top!r} (choix : {', '.join(TOP_MODES)})")
+    if top == "adaptive" and diagonal != "fixed":
+        raise ValueError("diagonal='adaptive' est sans objet avec top='adaptive'")
+    if top == "grid" or bottom == "grid":
+        c00, c10, c01, c11 = corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)
 
-    top_tris = np.concatenate([
-        np.stack([c00, c10, c01], axis=1),
-        np.stack([c10, c11, c01], axis=1),
-    ])
+    if top == "adaptive":
+        top_tris = adaptive_top_triangles(quad_ok, Xmm, Ymm, z_top_mm, top_tol_mm)
+    elif diagonal == "fixed":
+        top_tris = np.concatenate([
+            np.stack([c00, c10, c01], axis=1),
+            np.stack([c10, c11, c01], axis=1),
+        ])
+    elif diagonal == "adaptive":
+        # même structure (premier triangle de chaque cellule, puis second) ; diagonale c00-c11 quand elle relie
+        # les deux coins de plus faible écart d'altitude (orientation vers +z dans les deux cas)
+        ac = np.abs(c00[:, 2] - c11[:, 2]) <= np.abs(c10[:, 2] - c01[:, 2])
+        first = np.stack([c00, c10, np.where(ac[:, None], c11, c01)], axis=1)
+        second = np.where(ac[:, None, None], np.stack([c00, c11, c01], axis=1), np.stack([c10, c11, c01], axis=1))
+        top_tris = np.concatenate([first, second])
+    else:
+        raise ValueError(f"diagonal : valeur inconnue {diagonal!r} (choix : {', '.join(DIAGONAL_MODES)})")
 
     zb = -base_mm
-    c00b, c10b, c01b, c11b = c00.copy(), c10.copy(), c01.copy(), c11.copy()
-    for c in (c00b, c10b, c01b, c11b):
-        c[:, 2] = zb
+    if bottom == "merged":
+        bot_tris = merged_bottom_triangles(quad_ok, Xmm, Ymm, zb, cover="graded")
+    elif bottom == "merged-rows":
+        bot_tris = merged_bottom_triangles(quad_ok, Xmm, Ymm, zb, bottom_max_cells, cover="rows")
+    elif bottom == "grid":
+        c00b, c10b, c01b, c11b = c00.copy(), c10.copy(), c01.copy(), c11.copy()
+        for c in (c00b, c10b, c01b, c11b):
+            c[:, 2] = zb
 
-    bot_tris = np.concatenate([
-        np.stack([c00b, c01b, c10b], axis=1),
-        np.stack([c10b, c01b, c11b], axis=1),
-    ])
+        bot_tris = np.concatenate([
+            np.stack([c00b, c01b, c10b], axis=1),
+            np.stack([c10b, c01b, c11b], axis=1),
+        ])
+    else:
+        raise ValueError(f"bottom : valeur inconnue {bottom!r} (choix : {', '.join(BOTTOM_MODES)})")
 
     if smooth_wall:
         loop_ij = trace_boundary_loop(quad_ok)
@@ -269,38 +358,9 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
         all_tris = np.concatenate([top_tris, bot_tris, extra_tris, wall_tris])
         return all_tris, len(top_tris), len(bot_tris) + len(bottom_band_tris) + len(band_tris), len(wall_tris)
 
-    wall_tris = []
-
-    def add_wall(p1t, p2t, outward):
-        p1b = (p1t[0], p1t[1], zb)
-        p2b = (p2t[0], p2t[1], zb)
-        if outward:
-            wall_tris.append((p1t, p2t, p1b))
-            wall_tris.append((p2t, p2b, p1b))
-        else:
-            wall_tris.append((p2t, p1t, p1b))
-            wall_tris.append((p2b, p2t, p1b))
-
     H1, W1 = quad_ok.shape
-    for i in range(H1):
-        _progress(i, H1, "Parois (bord vertical)")
-        for j in range(W1 + 1):
-            left = quad_ok[i, j - 1] if j > 0 else False
-            right = quad_ok[i, j] if j < W1 else False
-            if left != right:
-                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
-                p2 = (Xmm[j], Ymm[i + 1], z_top_mm[i + 1, j])
-                add_wall(p1, p2, outward=bool(left))
-    for j in range(W1):
-        _progress(j, W1, "Parois (bord horizontal)")
-        for i in range(H1 + 1):
-            up = quad_ok[i - 1, j] if i > 0 else False
-            down = quad_ok[i, j] if i < H1 else False
-            if up != down:
-                p1 = (Xmm[j], Ymm[i], z_top_mm[i, j])
-                p2 = (Xmm[j + 1], Ymm[i], z_top_mm[i, j + 1])
-                add_wall(p1, p2, outward=bool(down))
-
-    wall_tris = np.array(wall_tris, dtype=np.float64)
+    _progress(0, 2, "Parois (bord vertical)")
+    wall_tris = build_plain_walls(quad_ok, Xmm, Ymm, z_top_mm, zb)
+    _progress(1, 2, "Parois (bord horizontal)")
     all_tris = np.concatenate([top_tris, bot_tris, wall_tris])
     return all_tris, len(top_tris), len(bot_tris), len(wall_tris)

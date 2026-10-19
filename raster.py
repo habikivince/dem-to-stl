@@ -6,6 +6,7 @@ Tout ce qui touche GDAL : ouverture du fichier source, détection et
 reprojection automatique du CRS, ré-échantillonnage fenêtré autour du
 centre choisi. Aucune logique géométrique ici (voir mesh.py).
 """
+import math
 import sys
 
 import numpy as np
@@ -190,8 +191,64 @@ def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, 
         f"ajoutées depuis la source secondaire, à plus faible résolution : raccord visible à la limite")
 
 
+RESAMPLE_CHOICES = ("auto", "average", "bilinear", "cubic", "cubicspline")
+# Au-delà de ce rapport (pixel de la source / pixel de travail), on considère que la source est
+# AGRANDIE : `average` de GDAL se comporte alors comme `nearest` (blocs constants, terrasses).
+UPSAMPLE_RATIO = 1.05
+
+
+def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8, reduce="min"):
+    """Taille du pixel de la source, en mètres dans le CRS cible, au voisinage de (cx, cy), parmi au plus
+    ``max_files`` fichiers de la liste : la plus fine (``reduce="min"``, défaut) ou la plus grossière
+    (``reduce="max"``) ; sur chaque fichier, l'axe le plus grossier (un pixel en degrés est plus étroit
+    en x qu'en y). None si elle ne peut pas être déterminée (l'appelant retombe alors sur `average`,
+    comportement historique)."""
+    if reduce not in ("min", "max"):
+        raise ValueError("reduce doit valoir 'min' ou 'max'")
+    paths = list(input_path) if isinstance(input_path, (list, tuple)) else [input_path]
+    if len(paths) > max_files:
+        step = len(paths) / max_files
+        paths = [paths[int(i * step)] for i in range(max_files)]
+    dst = osr.SpatialReference()
+    dst.ImportFromWkt(dst_srs_wkt)
+    dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    best = None
+    for path in paths:
+        try:
+            ds = gdal.Open(path)
+            gt, wkt = ds.GetGeoTransform(), ds.GetProjection()
+            if not wkt:
+                continue
+            src = osr.SpatialReference()
+            src.ImportFromWkt(wkt)
+            src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            fwd = osr.CoordinateTransformation(dst, src)
+            inv = osr.CoordinateTransformation(src, dst)
+            sx, sy, _ = fwd.TransformPoint(cx, cy)
+            x0, y0, _ = inv.TransformPoint(sx, sy)
+            xx, xy, _ = inv.TransformPoint(sx + gt[1], sy + gt[4])   # un pixel vers la droite
+            yx, yy, _ = inv.TransformPoint(sx + gt[2], sy + gt[5])   # un pixel vers le bas
+            size = max(math.hypot(xx - x0, xy - y0), math.hypot(yx - x0, yy - y0))
+        except (RuntimeError, ValueError, TypeError):
+            continue
+        if size > 0 and math.isfinite(size):
+            best = size if best is None else (min(best, size) if reduce == "min" else max(best, size))
+    return best
+
+
+def choose_resample_alg(mode, src_pixel_m, pixel_size_m):
+    """Algorithme de gdal.Warp. ``auto`` : `average` quand la grille de travail est plus grossière que
+    la source (réduction : moyenne = anticrénelage), `bilinear` quand elle est plus fine (agrandissement :
+    `average` donnerait des paliers plats, voir README). Sans connaître le pixel source : `average`."""
+    if mode != "auto":
+        return mode
+    if src_pixel_m is not None and src_pixel_m > UPSAMPLE_RATIO * pixel_size_m:
+        return "bilinear"
+    return "average"
+
+
 def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
-                inside_fn=None):
+                inside_fn=None, resample="auto"):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
@@ -201,7 +258,12 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     Si input_path porte un attribut `fill_loader` (voir sources.with_copernicus_fill),
     les trous du disque sont comblés par cette source secondaire, recalée en altitude.
     fill=False : valeurs brutes, sans comblement ni complément (compare_dems).
-    inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone)."""
+    inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone).
+    resample : "auto" (défaut), "average", "bilinear", "cubic" ou "cubicspline". En "auto", un DEM plus
+    grossier que la grille de travail est interpolé (bilinear) au lieu d'être répliqué par blocs ; avec
+    plusieurs sources de résolutions différentes, la plus grossière décide."""
+    if resample not in RESAMPLE_CHOICES:
+        raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
     ds = gdal.Open(_primary(input_path))
     nodata = ds.GetRasterBand(1).GetNoDataValue()
     loader = getattr(input_path, "fill_loader", None) if fill else None
@@ -211,12 +273,21 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     xmin, xmax = cx - radius, cx + radius
     ymin, ymax = cy - radius, cy + radius
 
+    # La source la plus GROSSIÈRE décide : dès qu'une source est agrandie, `average` la répliquerait par blocs
+    # (cas d'une mosaïque qui mêle une couche fine et un repli grossier, ex. GSI DEM1A + DEM5A).
+    src_px = source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, reduce="max") if resample == "auto" else None
+    alg = choose_resample_alg(resample, src_px, pixel_size_m)
+    if alg != "average":
+        why = (f"pixel de la source ≈ {src_px:.1f} m > pixel de travail {pixel_size_m:.2f} m : "
+               "la source est agrandie" if resample == "auto" else "demandé par --resample")
+        log(f"ré-échantillonnage {alg} ({why})")
+
     warped = gdal.Warp(
         "", input_path, format="MEM",
         dstSRS=dst_srs_wkt,
         outputBounds=(xmin, ymin, xmax, ymax),
         xRes=pixel_size_m, yRes=pixel_size_m,
-        resampleAlg="average",
+        resampleAlg=alg,
         dstNodata=nodata,
         callback=progress_cb or gdal.TermProgress_nocb,
     )

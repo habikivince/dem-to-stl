@@ -1,0 +1,15 @@
+usage: circle_dem_to_stl.py [-h] [--input INPUT] --output OUTPUT [--cx CX]
+                            [--cy CY] [--lat LAT] [--lon LON] [--full-res]
+                            [--fill-with-copernicus] [--place PLACE]
+                            [--place-pick PLACE_PICK] --radius RADIUS
+                            [--diameter-mm DIAMETER_MM] [--vexag VEXAG]
+                            [--base-mm BASE_MM]
+                            [--print-spacing-mm PRINT_SPACING_MM]
+                            [--sea-level SEA_LEVEL]
+                            [--min-elevation MIN_ELEVATION]
+                            [--land-threshold LAND_THRESHOLD] [--smooth-wall]
+                            [--download-copernicus]
+                            [--source {auto,copernicus,gsi,ign,kartverket,swisstopo,usgs}]
+                            [--copernicus-product {30,90}]
+                            [--cache-dir CACHE_DIR]
+circle_dem_to_stl.py: error: the following arguments are required: --output, --radius

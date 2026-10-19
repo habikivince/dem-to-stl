@@ -200,3 +200,32 @@ def test_check_stl_cli_exit_codes(monkeypatch, tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         check_stl.main()
     assert "extension non gérée" in str(e.value)
+
+
+def _check_results(tris):
+    ext = tris.reshape(-1, 3).max(axis=0) - tris.reshape(-1, 3).min(axis=0)
+    return {n: (ok, d) for n, ok, d in check_stl.check(tris, float(max(ext[0], ext[1])), BASE, tol_mm=1.0)}
+
+
+def test_check_stl_reports_positive_volume_and_no_degenerate_on_valid_solid():
+    tris, elev, quad_ok, xs, ys, min_e, _ = build(blob(3))
+    res = _check_results(tris)
+    assert res["orientation (volume signé)"][0] and res["triangles dégénérés"] == (True, "0 triangle(s) d'aire nulle")
+    assert check_stl.signed_volume(tris) == pytest.approx(expected_volume(elev, quad_ok, xs, ys, min_e, 1.0), rel=1e-4)
+
+
+def test_check_stl_detects_a_globally_flipped_solid_that_the_edge_test_accepts():
+    tris, *_ = build(blob(3))
+    flipped = tris[:, ::-1, :].copy()          # toutes les faces retournées : cohérent arête par arête
+    res = _check_results(flipped)
+    assert res["étanchéité"][0] is True        # l'ancien contrôle ne voyait rien
+    assert res["orientation (volume signé)"][0] is False and "NÉGATIF" in res["orientation (volume signé)"][1]
+
+
+def test_check_stl_counts_degenerate_triangles():
+    tris, *_ = build(blob(3))
+    a = tris[0]
+    step = np.array([1.0, 0.0, 0.0])
+    extra = np.array([[a[0], a[0], a[1]], [a[0], a[0] + step, a[0] + 2 * step]])   # sommet doublé ; trois points alignés
+    assert check_stl.degenerate_count(tris) == 0
+    assert check_stl.degenerate_count(np.concatenate([tris, extra])) == 2

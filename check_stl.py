@@ -4,7 +4,8 @@
 check_stl.py
 ------------
 Contrôle indépendant d'un STL binaire (ou d'un 3MF / OBJ) produit par circle_dem_to_stl.py : dimensions,
-épaisseur du socle, relief implicite, étanchéité du maillage.
+épaisseur du socle, relief implicite, étanchéité du maillage, orientation (volume signé) et triangles
+dégénérés.
 
 Le contrôle ne réutilise pas le code de maillage : il relit le fichier et compare ce
 qu'il contient à ce que les paramètres imposent.
@@ -57,6 +58,31 @@ def edge_report(tris):
             "nonmanifold_edges": int((counts > 2).sum()), "duplicate_directed_edges": int((dcounts > 1).sum())}
 
 
+def signed_volume(tris, block=1_000_000):
+    """Volume signé (mm³) d'un maillage de triangles (N, 3, 3), par la somme des produits mixtes
+    v0 · (v1 x v2) / 6. Positif quand les faces sont tournées vers l'extérieur du solide. Un maillage
+    entièrement retourné reste « étanche » et cohérent arête par arête : seul ce signe le révèle."""
+    total = 0.0
+    for i in range(0, len(tris), block):
+        t = tris[i:i + block]
+        total += float(np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum())
+    return total / 6.0
+
+
+def degenerate_count(tris, block=1_000_000):
+    """Nombre de triangles d'aire nulle : deux sommets identiques une fois arrondis en float32 (ce
+    que voient les fichiers de sortie) ou trois sommets exactement alignés (produit vectoriel nul)."""
+    n = 0
+    for i in range(0, len(tris), block):
+        t = tris[i:i + block]
+        f = t.astype(np.float32)
+        same = (np.all(f[:, 0] == f[:, 1], axis=1) | np.all(f[:, 1] == f[:, 2], axis=1)
+                | np.all(f[:, 0] == f[:, 2], axis=1))
+        cross = np.cross(f[:, 1].astype(np.float64) - f[:, 0], f[:, 2].astype(np.float64) - f[:, 0])
+        n += int((same | ~np.any(cross != 0.0, axis=1)).sum())
+    return n
+
+
 def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, tol_mm=None, watertight=True):
     """Liste de (nom, ok, détail). tol_mm : tolérance sur les dimensions (défaut 1 % du diamètre)."""
     tol_mm = 0.01 * diameter_mm if tol_mm is None else tol_mm
@@ -84,6 +110,12 @@ def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, t
         results.append(("étanchéité", ok,
                         f"{r['vertices']} sommets, {r['boundary_edges']} arête(s) ouverte(s), "
                         f"{r['nonmanifold_edges']} non-manifold, {r['duplicate_directed_edges']} mal orientée(s)"))
+        vol = signed_volume(tris)
+        results.append(("orientation (volume signé)", vol > 0,
+                        f"{vol:.1f} mm³" + (" (faces tournées vers l'extérieur)" if vol > 0
+                                            else " : NÉGATIF ou nul, faces tournées vers l'intérieur")))
+        nd = degenerate_count(tris)
+        results.append(("triangles dégénérés", nd == 0, f"{nd} triangle(s) d'aire nulle"))
     return results
 
 
