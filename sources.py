@@ -24,6 +24,8 @@ proche plutôt que de télécharger du 1 m inutile.
   - IGN : WMS-R Géoplateforme (annexe officielle lue), couche LiDAR HD brute
     non confirmée sur serveur ; repli RGE ALTI.
 """
+import email.utils
+import http.client
 import json
 import math
 import os
@@ -34,6 +36,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, List, Tuple
 
 import numpy as np
@@ -62,14 +65,37 @@ class NoCoverage(SourceUnavailable):
 # Utilitaires réseau / géométrie
 # ---------------------------------------------------------------------------
 
+HTTP_RETRY_AFTER_MAX = 60    # secondes : plafond de l'attente demandée par un serveur (en-tête Retry-After)
+
+
+def _retry_after_seconds(value, now=None):
+    """Durée demandée par un en-tête Retry-After (secondes entières ou date HTTP), en secondes, plafonnée à
+    HTTP_RETRY_AFTER_MAX ; 0 si l'en-tête est absent ou illisible."""
+    if not value:
+        return 0.0
+    value = value.strip()
+    if value.isdigit():
+        return min(float(value), HTTP_RETRY_AFTER_MAX)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc) if now is None else now
+    return min(max((when - now).total_seconds(), 0.0), HTTP_RETRY_AFTER_MAX)
+
+
 def _http_get(url, timeout=None, retries=None):
     """Renvoie les octets de la réponse, ou None pour un 404. Réessaie avec
-    attente exponentielle sur erreurs transitoires ; lève SourceUnavailable
+    attente exponentielle sur erreurs transitoires (au moins la durée demandée par un en-tête
+    Retry-After sur 429 ou 503, plafonnée à HTTP_RETRY_AFTER_MAX) ; lève SourceUnavailable
     sinon (réseau, timeout, 4xx/5xx)."""
     timeout = HTTP_TIMEOUT if timeout is None else timeout
     retries = HTTP_RETRIES if retries is None else retries
     last = None
     for attempt in range(retries):
+        retry_after = 0.0
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -84,10 +110,14 @@ def _http_get(url, timeout=None, retries=None):
             last = f"{e}{' — ' + body if body else ''}"
             if e.code not in (429, 500, 502, 503, 504):
                 break
-        except OSError as e:  # URLError, timeout, connexion coupée
+            if e.code in (429, 503):
+                retry_after = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
+        except (OSError, http.client.HTTPException) as e:
+            # URLError, timeout, connexion coupée ; IncompleteRead (réponse tronquée) dérive de
+            # HTTPException, pas d'OSError : sans cela elle sortait brute et sans nouvelle tentative.
             last = e
         if attempt < retries - 1:
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(max(min(2 ** attempt, 8), retry_after))
     raise SourceUnavailable(f"{url} : {last}")
 
 
@@ -103,13 +133,45 @@ def _http_json(url, params=None):
         raise SourceUnavailable(f"{url} : réponse JSON invalide ({e})")
 
 
-def _download(url, dest):
-    """Télécharge vers dest (écriture atomique) sauf si déjà en cache."""
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _is_tiff(head):
+    """True si les premiers octets sont ceux d'un TIFF (classique ou BigTIFF)."""
+    return head[:4] in TIFF_MAGICS
+
+
+def _is_png(head):
+    return head[:8] == PNG_MAGIC
+
+
+def _file_head(path, n=16):
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def _snippet(data, n=120):
+    return data[:n].decode("utf-8", "replace").replace("\n", " ").strip()
+
+
+def _download(url, dest, validate=None):
+    """Télécharge vers dest (écriture atomique) sauf si déjà en cache.
+
+    ``validate(octets_de_tête) -> bool`` contrôle le contenu : une réponse HTTP 200 qui contient en
+    réalité un message d'erreur (XML, HTML) n'est ni écrite dans le cache, ni réutilisée si elle y
+    figure déjà d'une exécution précédente (le fichier invalide est alors retéléchargé)."""
     if os.path.exists(dest):
-        return dest
+        if validate is None or validate(_file_head(dest)):
+            return dest
+        os.remove(dest)  # entrée de cache invalide (réponse d'erreur enregistrée autrefois) : on refait
     data = _http_get(url)
     if data is None:
         raise SourceUnavailable(f"{url} : HTTP 404")
+    if validate is not None and not validate(data[:16]):
+        raise SourceUnavailable(f"{url} : réponse inattendue (contenu invalide) — {_snippet(data)}")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
     with open(tmp, "wb") as f:
@@ -198,7 +260,7 @@ def fetch_swisstopo(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
     for u in urls:
         dest = os.path.join(cache_dir, "swisstopo", os.path.basename(urllib.parse.urlparse(u).path))
         log(f"  {os.path.basename(dest)} : {'en cache' if os.path.exists(dest) else 'téléchargement...'}")
-        out.append(_download(u, dest))
+        out.append(_download(u, dest, validate=_is_tiff))
     return out
 
 
@@ -622,13 +684,19 @@ def _gsi_tile(z, x, y, cache_dir):
         if z > zmax:
             continue
         path = os.path.join(cache_dir, "gsi", layer, str(z), f"{x}_{y}.png")
+        data = None
         if os.path.exists(path):
             with open(path, "rb") as f:
                 data = f.read()
-        else:
+            if not _is_png(data):
+                os.remove(path)  # cache invalide (réponse d'erreur enregistrée autrefois) : on refait
+                data = None
+        if data is None:
             data = _http_get(GSI_URL.format(layer=layer, z=z, x=x, y=y))
             if data is None:
                 continue
+            if not _is_png(data):
+                raise SourceUnavailable(f"GSI : tuile {layer}/{z}/{x}/{y} : réponse inattendue — {_snippet(data)}")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path + ".part", "wb") as f:
                 f.write(data)
@@ -636,11 +704,57 @@ def _gsi_tile(z, x, y, cache_dir):
         try:
             return decode_gsi_rgb(_read_png_rgb(data)), layer
         except RuntimeError:
+            if os.path.exists(path):
+                os.remove(path)  # ne pas garder en cache une tuile illisible
             raise SourceUnavailable(f"GSI : tuile {layer}/{z}/{x}/{y} illisible")
     return None, None
 
 
+def _gsi_collect(z, tiles, cache_dir):
+    """Télécharge (ou lit en cache) les tuiles ``tiles`` (liste de (x, y)) au zoom ``z``.
+    Renvoie ({(x, y): altitudes 256x256}, {couche: nombre})."""
+    found, used = {}, {}
+    for x, y in tiles:
+        h, layer = _gsi_tile(z, x, y, cache_dir)
+        if h is None:
+            continue
+        found[(x, y)] = h
+        used[layer] = used.get(layer, 0) + 1
+    return found, used
+
+
+def _gsi_write_mosaic(found, z, cache_dir):
+    """Écrit un GeoTIFF Web Mercator (nodata partout où il n'y a pas de tuile) couvrant la boîte englobante
+    des tuiles de ``found`` ({(x, y): altitudes}) au zoom ``z``. Renvoie son chemin."""
+    xs, ys = [k[0] for k in found], [k[1] for k in found]
+    x0, y0, nx, ny = min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+    mosaic = np.full((ny * 256, nx * 256), NODATA, dtype=np.float32)
+    for (x, y), h in found.items():
+        i, j = x - x0, y - y0
+        mosaic[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = np.where(np.isnan(h), NODATA, h)
+    tile_m = 2 * WM_ORIGIN / 2 ** z
+    px = tile_m / 256
+    dest = os.path.join(cache_dir, "gsi", f"mosaic_z{z}_{x0}_{y0}_{nx}x{ny}.tif")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    ds = gdal.GetDriverByName("GTiff").Create(dest, nx * 256, ny * 256, 1, gdal.GDT_Float32,
+                                              ["COMPRESS=DEFLATE", "TILED=YES"])
+    ds.SetGeoTransform((-WM_ORIGIN + x0 * tile_m, px, 0, WM_ORIGIN - y0 * tile_m, 0, -px))
+    ds.SetProjection(_srs(3857).ExportToWkt())
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(NODATA)
+    band.WriteArray(mosaic)
+    ds = None
+    return dest
+
+
 def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
+    """Mosaïque(s) GeoTIFF des tuiles d'élévation GSI. Renvoie une liste de chemins, du plus grossier au plus
+    fin : `gdal.Warp` les superpose dans l'ordre (le dernier l'emporte là où il a des données).
+
+    Repli de résolution : au zoom demandé, seules les couches dont le zoom maximal est suffisant sont
+    interrogées (DEM1A jusqu'au zoom 17, DEM5A/5B jusqu'à 15, DEM10B jusqu'à 14). Pour une tuile absente, on
+    prend donc la tuile ancêtre de la couche suivante (zoom 15, puis 14) ; cette tuile plus grossière est
+    ensuite interpolée par le ré-échantillonnage de `raster.warp_window` (bilinéaire quand elle est agrandie)."""
     bbox = circle_bbox_wgs84(lat, lon, radius_m)
     z = gsi_zoom_for_pixel(lat, pixel_size_m)
     x0, y0, x1, y1 = gsi_tile_range(bbox, z)
@@ -651,33 +765,35 @@ def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
     nx, ny = x1 - x0 + 1, y1 - y0 + 1
     log(f"GSI : zoom {z}, {nx * ny} tuile(s) (pixel de travail {pixel_size_m:.2f} m)")
 
-    mosaic = np.full((ny * 256, nx * 256), NODATA, dtype=np.float32)
-    used, missing = {}, 0
-    for j in range(ny):
-        for i in range(nx):
-            h, layer = _gsi_tile(z, x0 + i, y0 + j, cache_dir)
-            if h is None:
-                missing += 1
-                continue
-            used[layer] = used.get(layer, 0) + 1
-            mosaic[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = np.where(np.isnan(h), NODATA, h)
-    if not used:
-        raise NoCoverage("GSI : aucune tuile d'élévation pour cette zone")
-    log("GSI : couches utilisées " + ", ".join(f"{k}={v}" for k, v in used.items())
-        + (f" ; {missing} tuile(s) absente(s)" if missing else ""))
+    fine, used = _gsi_collect(z, [(x0 + i, y0 + j) for j in range(ny) for i in range(nx)], cache_dir)
+    missing_fine = {(x0 + i, y0 + j) for j in range(ny) for i in range(nx)} - set(fine)
 
-    tile_m = 2 * WM_ORIGIN / 2 ** z
-    px = tile_m / 256
-    dest = os.path.join(cache_dir, "gsi", f"mosaic_z{z}_{x0}_{y0}_{nx}x{ny}.tif")
-    ds = gdal.GetDriverByName("GTiff").Create(dest, nx * 256, ny * 256, 1, gdal.GDT_Float32,
-                                              ["COMPRESS=DEFLATE", "TILED=YES"])
-    ds.SetGeoTransform((-WM_ORIGIN + x0 * tile_m, px, 0, WM_ORIGIN - y0 * tile_m, 0, -px))
-    ds.SetProjection(_srs(3857).ExportToWkt())
-    band = ds.GetRasterBand(1)
-    band.SetNoDataValue(NODATA)
-    band.WriteArray(mosaic)
-    ds = None
-    return [dest]
+    coarse_dests = []                                     # du plus fin au plus grossier, inversé à la fin
+    uncovered = set(missing_fine)
+    for level in sorted({zm for _, zm in GSI_LAYERS if zm < z}, reverse=True):
+        if not uncovered:
+            break
+        dz = z - level
+        ancestors = sorted({(x >> dz, y >> dz) for x, y in uncovered})
+        found, used_c = _gsi_collect(level, ancestors, cache_dir)
+        if not found:
+            continue
+        coarse_dests.append(_gsi_write_mosaic(found, level, cache_dir))
+        uncovered = {(x, y) for x, y in uncovered if (x >> dz, y >> dz) not in found}
+        log(f"GSI : repli de résolution au zoom {level} ({sum(used_c.values())} tuile(s) : "
+            + ", ".join(f"{k}={v}" for k, v in used_c.items()) + f") ; {len(missing_fine) - len(uncovered)} "
+            f"tuile(s) absente(s) du zoom {z} couvertes au total")
+    if not fine and not coarse_dests:
+        raise NoCoverage("GSI : aucune tuile d'élévation pour cette zone")
+    if fine:
+        log("GSI : couches utilisées " + ", ".join(f"{k}={v}" for k, v in used.items())
+            + (f" ; {len(missing_fine)} tuile(s) absente(s)" if missing_fine else ""))
+    if uncovered and (fine or coarse_dests):
+        log(f"GSI : {len(uncovered)} tuile(s) du zoom {z} sans aucune donnée (mer ou hors couverture)")
+    paths = list(reversed(coarse_dests))
+    if fine:
+        paths.append(_gsi_write_mosaic(fine, z, cache_dir))
+    return paths
 
 
 # ---------------------------------------------------------------------------

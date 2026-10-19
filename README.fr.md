@@ -157,6 +157,12 @@ python circle_dem_to_stl.py \
 | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
 | `--vexag` | Exagération verticale | demandée si omise (1.0) |
 | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
+| `--resample` | Ré-échantillonnage du DEM : `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
+| `--top` | Triangulation du dessus : `grid`, `adaptive` (prototype) | `grid` |
+| `--top-tol-mm` | Avec `--top adaptive` : tolérance verticale, en mm d'impression | 0.05 |
+| `--diagonal` | Diagonale de coupe des cellules du dessus : `fixed`, `adaptive` (prototype) | `fixed` |
+| `--bottom` | Triangulation du fond plat : `grid`, `merged` (prototype), `merged-rows` (comparaison) | `grid` |
+| `--bottom-max-cells` | Avec `merged-rows` : côté maximal d'un rectangle, en cellules (0 = sans limite) | 0 |
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
@@ -245,7 +251,8 @@ les résultats sont mis en cache dans `--cache-dir`. Données de géocodage
 ### Résolution et qualité des sources automatiques
 
 Le maillage est limité par `--print-spacing-mm` : le DEM est ré-échantillonné
-(`average`) à `print-spacing / échelle` mètres par pixel (affiché comme « résolution
+(`average` quand la grille de travail est plus grossière que la source, voir `--resample`
+ci-dessous) à `print-spacing / échelle` mètres par pixel (affiché comme « résolution
 de ré-échantillonnage » dans le log, par ex. 8 m pour une impression de 150 mm d'un
 rayon de 3 km). Les sources ne récupèrent donc que la résolution utile à cette grille
 (swisstopo 2 m au lieu de 0,5 m, tuiles GSI au zoom correspondant, requêtes WCS/WMS à
@@ -257,6 +264,54 @@ une grille quasi identique.
   lourds, maillage de même taille). Sans lui, Kartverket et IGN ré-échantillonnent côté
   serveur (plus proche voisin) à 2x la résolution de travail avant de moyenner ;
   `--full-res` supprime ce raccourci.
+* `--resample auto` (défaut) utilise `average` quand la grille de travail est plus grossière
+  que la source (la moyenne fait de l'anticrénelage) et `bilinear` quand elle est plus fine,
+  c'est-à-dire quand le DEM est agrandi (par exemple un DEM mondial de 30 m sur un petit
+  rayon, ou le repli Copernicus). Le `average` de GDAL se comporte alors comme le plus
+  proche voisin : la surface devient des paliers plats séparés par des marches (dans un
+  test synthétique, 25 à 77 % des cellules avaient une pente exactement nulle pour un
+  agrandissement de 4x à 16x). Le log indique « ré-échantillonnage bilinear » quand c'est
+  le cas. `cubic` peut dépasser près des falaises (environ 7 % de la marche, soit 71 m
+  sur une falaise de 1000 m) ; `cubicspline` lisse sans dépasser ; `average` impose
+  l'ancien comportement.
+* `--top adaptive` (prototype, le défaut reste `grid`) remplace le dessus par un maillage RTIN à
+  erreur bornée (réseau irrégulier de triangles rectangles) : très peu de triangles là où le relief
+  est lisse, pleine résolution le long du contour et des jonctions de blocs de 1024 cellules, donc
+  les parois et le fond sont inchangés et le solide reste étanche. La tolérance est nominale :
+  mesurée contre les nœuds du DEM sur quatre relevés réels, l'écart maximal vaut 1,5 à 1,8 fois
+  `--top-tol-mm` (pour garantir une erreur maximale donnée, en prendre la moitié). La réduction
+  dépend du détail réel que porte la grille de travail : un relevé de 5 m dérivé du LiDAR imprimé à
+  250 mm / 0,2 mm passe de 2,5 M à 144 000 triangles à 0,05 mm (−94 %) ; un relief de type bruit ne
+  perd presque rien. La mémoire est bornée par la taille des blocs. `--diagonal adaptive` n'a pas
+  de sens avec cette option (refusé).
+* `--diagonal adaptive` (prototype, le défaut reste `fixed`) coupe chaque cellule du dessus selon la
+  diagonale qui relie les deux coins de plus faible écart d'altitude. Même nombre de triangles, mêmes
+  sommets, mêmes parois et même fond : seule la surface change. Mesurée au centre des cellules contre
+  le DEM lui-même sur six relevés réels (pixels de 5 m à 240 m), l'erreur moyenne baisse de 4 % (pas de
+  grille 4) à 7 % (pas 8) par rapport à la diagonale fixe, de 13 à 25 % sur le relevé de 5 m dérivé du
+  LiDAR, et monte de 2,5 % au pire (le relevé de 240 m). Au pas par défaut de 0,2 mm la différence est
+  très faible ; elle compte pour des pas grossiers par rapport au détail du relief.
+* `--bottom merged` (prototype, le défaut reste `grid`) triangule le fond plat avec les carrés d'un
+  quadtree équilibré, chacun en éventail gardant tous les nœuds de contour nécessaires : aucune
+  jonction en T, le solide reste étanche. La géométrie est identique (même plan, même contour,
+  même volume : les tests les comparent à 1e-12) mais le fichier a environ moitié moins de
+  triangles (le fond perd 96 à 99 %), un pic de RAM plus bas et une taille réduite. Les triangles
+  restent compacts (allongement d'au plus 4 dans les tests). `merged-rows` utilise des rectangles
+  gloutons (la méthode du dépôt my3dmaps) : encore moins de triangles, mais extrêmement allongés
+  (allongement supérieur à 10^5 mesuré sur un disque), conservé pour comparaison seulement.
+  Vérifiez le résultat dans votre trancheur et votre FAO avant d'en faire le défaut.
+* Les réponses HTTP 429 et 503 avec un en-tête `Retry-After` (secondes ou date HTTP) sont
+  attendues, au moins cette durée, plafonnée à 60 s.
+* Les téléchargements sont contrôlés : une réponse tronquée est retentée, et une page
+  d'erreur reçue en HTTP 200 (XML/HTML au lieu d'un GeoTIFF ou d'un PNG) n'est ni mise en
+  cache ni réutilisée si une exécution précédente l'y avait enregistrée (le fichier
+  invalide est retéléchargé).
+* Repli de résolution GSI : aux résolutions de travail fines (zoom 16-17), seule la couche DEM1A est
+  interrogée. Une tuile qu'elle n'a pas laissait un trou (ou « aucune tuile » pour toute la zone). Elle est maintenant remplacée par les couches suivantes à leur propre
+  zoom (DEM5A/5B au zoom 15, puis DEM10B au zoom 14) ; ces mosaïques plus grossières sont transmises
+  au ré-échantillonnage, qui les interpole (bilinéaire) sous la mosaïque fine. Le log indique « repli
+  de résolution ». Avec plusieurs sources de résolutions différentes, la plus grossière décide du
+  choix de `--resample auto`.
 * Les tuiles d'élévation GSI sont dérivées du DEM (interpolées, pas de 1 cm), pas le
   maillage JPGIS brut ; leur nombre est plafonné, donc une très grande zone utilise un
   zoom plus grossier.
@@ -310,7 +365,9 @@ python check_stl.py cervin.stl --diameter-mm 150 --base-mm 3 --radius 3000 --rel
 Relit le STL binaire (indépendamment du code de maillage) et vérifie la plus grande
 dimension horizontale, l'épaisseur du socle, le dénivelé impliqué par l'échelle (avec
 `--radius`, éventuellement comparé à `--relief-m`, tolérance 1 %) et l'étanchéité
-(arêtes ouvertes, non-manifold ou mal orientées). Code de sortie 1 en cas d'échec ;
+(arêtes ouvertes, non-manifold ou mal orientées), le signe du volume signé (un solide
+entièrement retourné est cohérent arête par arête : seul ce signe le révèle) et les
+triangles dégénérés. Code de sortie 1 en cas d'échec ;
 `--tol-mm` règle la tolérance sur les dimensions, `--no-watertight` saute le test des
 arêtes sur de très gros fichiers.
 
