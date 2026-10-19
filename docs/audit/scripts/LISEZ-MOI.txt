@@ -1,0 +1,7 @@
+Scripts de mesure de la phase 3 (rapport 9). Chemins de mon environnement (/home/claude/...) : à adapter.
+Relevés réels utilisés (extraits des archives des dépôts audités, non redistribuables ici) : DEM-Cropper (big_island, maui_nui, oahu, kauai, statewide .tif), TouchTerrain (SheepMtn.tif, geotiff_example.tif), mapa (cotopaxi.tiff, hawaii.tiff), terrain-to-stl de l USACE (example.tif), phstl (region.tif).
+- diag_real.py : diagonale fixe contre adaptative, sur fenêtres réelles sans nodata.
+- tin_real.py : RTIN à bord forcé sur grilles produites par la chaîne de dem-to-stl (fraction de triangles conservée par tolérance).
+- tin_cli.py, tin_big.py : comparaison grille et dessus adaptatif par la ligne de commande (triangles, durée, taille, contrôles).
+- tin_err.py : écart réel entre la surface adaptative et les altitudes des nœuds (matplotlib).
+- tin_slice_prep.py : produit les STL de comparaison pour PrusaSlicer. - mem_run.sh : exécution sous plafond mémoire.
