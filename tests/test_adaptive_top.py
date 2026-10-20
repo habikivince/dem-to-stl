@@ -20,6 +20,12 @@ import mesh_export  # noqa: E402
 from test_mesh_properties import BASE, SCALE, blob, build, make_tifs  # noqa: E402
 
 
+def _cross2d(a, b):
+    """Composante z du produit vectoriel de vecteurs 2D (n, 2). np.cross n'accepte plus les vecteurs 2D depuis NumPy 2.5
+    (dépréciation de la 2.0 arrivée à terme) : même valeur que np.cross sur des vecteurs complétés par z = 0."""
+    return a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
+
+
 def smooth_terrain(H, W, seed, sigma=3.0, amp=8.0):
     rng = np.random.default_rng(seed)
     return ndimage.gaussian_filter(rng.normal(size=(H + 1, W + 1)), sigma) * amp
@@ -111,7 +117,7 @@ def test_every_node_on_the_mask_boundary_is_a_vertex_and_every_boundary_cell_is_
             around = [cp[i, j], cp[i, j + 1], cp[i + 1, j], cp[i + 1, j + 1]]
             if any(around) and not all(around):
                 assert (j, i) in verts, f"nœud de bord ({i}, {j}) absent du dessus"
-    area = 0.5 * np.abs(np.cross(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
+    area = 0.5 * np.abs(_cross2d(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
     assert area.sum() == pytest.approx(mask.sum())                      # les triangles couvrent exactement le masque
 
 
@@ -208,7 +214,7 @@ def test_blocks_keep_the_solid_closed_and_the_deviation_bounded(seed, block):
     tol = 0.1
     tris = adaptive_top.adaptive_top_triangles(mask, np.arange(mask.shape[1] + 1, dtype=float),
                                                -np.arange(mask.shape[0] + 1, dtype=float), z, tol, block=block)
-    area = 0.5 * np.abs(np.cross(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
+    area = 0.5 * np.abs(_cross2d(tris[:, 1, :2] - tris[:, 0, :2], tris[:, 2, :2] - tris[:, 0, :2]))
     assert area.sum() == pytest.approx(mask.sum())              # couverture exacte du masque, sans recouvrement
     assert max_deviation(tris, mask, z) <= 2.0 * tol + 1e-9
     # étanchéité de la seule surface : chaque arête intérieure est partagée par deux triangles, sans fissure
