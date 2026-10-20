@@ -426,10 +426,11 @@ utilisé à la place (valeurs interpolées, pas le maillage JPGIS brut).
 `austria` (BEV) : la licence (CC BY 4.0), la résolution de 1 m et le service de
 téléchargement ATOM viennent de la fiche officielle du fournisseur ; l'adresse du
 flux, la forme des titres de ses entrées et l'idée que les COG déclarent un CRS
-inutilisable viennent du projet libre `geostl`. Or la dalle examinée (E = 4 500 000 m)
-déclare un CRS correct (« ETRS89-extended / LAEA Europe », lu avec `gdalinfo`) : le petit
-VRT local dont l'outil enveloppe chaque dalle, et qui impose EPSG:3035, n'est donc
-probablement pas indispensable ; il est conservé par précaution. **Essayée sur le vrai serveur du BEV à deux endroits seulement**
+inutilisable viennent du projet libre `geostl`. Or les deux dalles examinées
+(E = 4 500 000 et 4 550 000 m) déclarent un CRS correct (« ETRS89-extended / LAEA
+Europe », EPSG:3035, lu avec GDAL 3.13.3) : le petit VRT local dont l'outil enveloppe
+chaque dalle, et qui impose EPSG:3035, n'est donc probablement pas indispensable ; il
+est conservé par précaution. **Essayée sur le vrai serveur du BEV à deux endroits seulement**
 (octobre 2026, série du 15.09.2025, tous deux en haute montagne) : le Grossglockner
 (une dalle) et une zone à cheval sur la limite de deux dalles (E = 4 550 000 m,
 raccord vertical) ; dans les deux cas le STL est étanche (`check_stl.py`) et le raccord

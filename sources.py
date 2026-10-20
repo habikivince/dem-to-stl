@@ -26,8 +26,9 @@ proche plutôt que de télécharger du 1 m inutile.
   - BEV (Autriche) : licence, résolution et service ATOM lus sur la fiche officielle ; adresse du
     flux et forme des titres reprises du dépôt geostl (MIT). TESTÉ EN RÉEL (octobre 2026, série du
     15.09.2025) : Grossglockner (une dalle) et limite de deux dalles à E = 4 550 000 m. Le CRS
-    « erroné » des COG annoncé par geostl n'a PAS été retrouvé (dalle E = 4 500 000 m : « ETRS89-extended
-    / LAEA Europe » lu avec gdalinfo) : le VRT qui impose EPSG:3035 est conservé par précaution. Hors de `auto` : à demander explicitement (--source austria).
+    « erroné » des COG annoncé par geostl n'a PAS été retrouvé (deux dalles, E = 4 500 000 et 4 550 000 m :
+    « ETRS89-extended / LAEA Europe », EPSG:3035, GDAL 3.13.3) : le VRT qui impose EPSG:3035 est conservé
+    par précaution. Hors de `auto` : à demander explicitement (--source austria).
 """
 import email.utils
 import http.client
@@ -811,7 +812,7 @@ def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
 # Repris du dépôt geostl (MIT) : l'adresse du flux, la forme des titres (« ALS DTM
 # CRS3035RES50000mN2700000E4600000 Höhenraster 1m Stichtag 15.09.2025 ») et les liens atom, confirmés
 # par un essai réel en octobre 2026 ; et le fait que les COG déclarent un CRS erroné (d'où le VRT qui
-# impose EPSG:3035), NON retrouvé sur la dalle E = 4 500 000 m (CRS correct) : le VRT est une précaution.
+# impose EPSG:3035), NON retrouvé sur les deux dalles essayées (CRS correct, GDAL 3.13.3) : le VRT est une précaution.
 # Une dalle fait 50 km de côté : elle n'est JAMAIS téléchargée en entier, GDAL ne lit que la fenêtre
 # demandée (et les aperçus du COG quand la grille de travail est plus grossière que 1 m).
 
@@ -881,7 +882,7 @@ def _vsicurl(url):
 def _bev_vrt(url, dest):
     """VRT local (quelques ko) qui pointe sur la dalle distante en lui imposant EPSG:3035, sans rien lire
     de ses pixels : les COG du BEV déclareraient un CRS « ingénierie » inutilisable (d'après geostl ;
-    non retrouvé sur la dalle examinée, conservé par précaution)."""
+    non retrouvé sur les deux dalles examinées, conservé par précaution)."""
     if os.path.exists(dest):
         return dest
     os.makedirs(os.path.dirname(dest), exist_ok=True)
