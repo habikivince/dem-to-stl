@@ -425,12 +425,17 @@ utilisé à la place (valeurs interpolées, pas le maillage JPGIS brut).
 
 `austria` (BEV) : la licence (CC BY 4.0), la résolution de 1 m et le service de
 téléchargement ATOM viennent de la fiche officielle du fournisseur ; l'adresse du
-flux, la forme des titres de ses entrées et le fait que les COG déclarent un CRS
-inutilisable (l'outil enveloppe donc chaque dalle dans un petit VRT local qui impose
-EPSG:3035) viennent du projet libre `geostl`. **Rien de tout cela n'a été essayé sur
-le vrai serveur du BEV**, d'où l'absence de cette source dans `auto` : essaie d'abord
-`--source austria` et signale tout échec. Chaque dalle fait 50 km de côté et n'est
-jamais téléchargée en entier. Le CRS de travail est celui de la source (EPSG:3035) ;
+flux, la forme des titres de ses entrées et l'idée que les COG déclarent un CRS
+inutilisable viennent du projet libre `geostl` ; par précaution, l'outil enveloppe donc
+chaque dalle dans un petit VRT local qui impose EPSG:3035 (sans avoir vérifié que c'est
+indispensable). **Essayée sur le vrai serveur du BEV à deux endroits seulement**
+(octobre 2026, série du 15.09.2025, tous deux en haute montagne) : le Grossglockner
+(une dalle) et une zone à cheval sur la limite de deux dalles (E = 4 550 000 m,
+raccord vertical) ; dans les deux cas le STL est étanche (`check_stl.py`) et le raccord
+est invisible sur l'aperçu. Pas encore essayés : une plaine de l'est, le Vorarlberg,
+une jonction de quatre dalles, un rayon de plusieurs dizaines de km. C'est pourquoi la
+source n'est pas dans `auto` : ailleurs, essaie d'abord `--source austria` et signale
+tout échec. Chaque dalle fait 50 km de côté et n'est jamais téléchargée en entier. Le CRS de travail est celui de la source (EPSG:3035) ;
 sa distorsion d'échelle sur l'Autriche est d'au plus 0,08 % environ (mesurée en six
 points avec GDAL 3.8.4), soit 0,15 mm sur un modèle de 200 mm. La précision en
 hauteur du BEV est en général de ±0,5 m, davantage en haute montagne (fiche du

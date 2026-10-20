@@ -24,8 +24,10 @@ proche plutôt que de télécharger du 1 m inutile.
   - IGN : WMS-R Géoplateforme (annexe officielle lue), couche LiDAR HD brute
     non confirmée sur serveur ; repli RGE ALTI.
   - BEV (Autriche) : licence, résolution et service ATOM lus sur la fiche officielle ; adresse du
-    flux, forme des titres et CRS erroné des COG repris du dépôt geostl (MIT), JAMAIS essayés
-    sur le serveur réel. Hors de `auto` : à demander explicitement (--source austria).
+    flux et forme des titres reprises du dépôt geostl (MIT). TESTÉ EN RÉEL (octobre 2026, série du
+    15.09.2025) : Grossglockner (une dalle) et limite de deux dalles à E = 4 550 000 m. Le CRS
+    « erroné » des COG (d'après geostl) n'est PAS vérifié : le VRT qui impose EPSG:3035 est une
+    précaution. Hors de `auto` : à demander explicitement (--source austria).
 """
 import email.utils
 import http.client
@@ -806,9 +808,10 @@ def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
 # ---------------------------------------------------------------------------
 # Lu sur la fiche officielle du BEV (série « ALS DTM Höhenraster 1m ») : licence CC-BY-4.0, MNT 1 m
 # (hors végétation) sur tout le pays en 55 dalles, GeoTIFF/COG, téléchargement par service ATOM.
-# Repris du dépôt geostl (MIT) et NON vérifié sur le serveur réel : l'adresse du flux, la forme des
-# titres (« ALS DTM CRS3035RES50000mN2700000E4600000 Höhenraster 1m Stichtag 15.09.2025 »), les
-# liens atom, et le fait que les COG déclarent un CRS erroné (d'où le VRT qui impose EPSG:3035).
+# Repris du dépôt geostl (MIT) : l'adresse du flux, la forme des titres (« ALS DTM
+# CRS3035RES50000mN2700000E4600000 Höhenraster 1m Stichtag 15.09.2025 ») et les liens atom, confirmés
+# par un essai réel en octobre 2026 ; et le fait que les COG déclarent un CRS erroné (d'où le VRT qui
+# impose EPSG:3035), NON vérifié : le VRT est une précaution.
 # Une dalle fait 50 km de côté : elle n'est JAMAIS téléchargée en entier, GDAL ne lit que la fenêtre
 # demandée (et les aperçus du COG quand la grille de travail est plus grossière que 1 m).
 
@@ -877,7 +880,8 @@ def _vsicurl(url):
 
 def _bev_vrt(url, dest):
     """VRT local (quelques ko) qui pointe sur la dalle distante en lui imposant EPSG:3035, sans rien lire
-    de ses pixels : les COG du BEV déclareraient un CRS « ingénierie » inutilisable (d'après geostl)."""
+    de ses pixels : les COG du BEV déclareraient un CRS « ingénierie » inutilisable (d'après geostl ;
+    non vérifié, précaution)."""
     if os.path.exists(dest):
         return dest
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -948,8 +952,9 @@ SOURCES = {s.name: s for s in [
     Source("ign", "IGN MNT LiDAR HD / RGE ALTI (France)", list(IGN_REGION_BOXES.values()), fetch_ign),
     Source("austria", "BEV MNT laser aéroporté 1 m (Autriche)", [BEV_BOX], fetch_austria),
 ]}
-# « austria » n'est volontairement pas dans AUTO_ORDER : écrite d'après la fiche du BEV et le dépôt geostl,
-# jamais essayée sur le serveur réel. À réserver à --source austria tant qu'un essai réel n'a pas eu lieu.
+# « austria » n'est volontairement pas dans AUTO_ORDER : essayée sur le serveur réel à deux endroits seulement
+# (haute montagne, une dalle puis deux). À réserver à --source austria tant que d'autres zones (plaine de l'est,
+# Vorarlberg, jonction de quatre dalles, grand rayon) n'ont pas été essayées.
 AUTO_ORDER = ["swisstopo", "kartverket", "usgs", "gsi", "ign"]
 
 

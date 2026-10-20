@@ -422,12 +422,18 @@ instead (interpolated values, not the raw JPGIS mesh).
 
 `austria` (BEV): licence (CC BY 4.0), 1 m resolution and the ATOM download
 service come from the provider's official record; the feed address, the title
-format of its entries and the fact that the COGs declare an unusable CRS (the
-tool therefore wraps each tile in a small local VRT that forces EPSG:3035) come
-from the open-source `geostl` project. **None of this has been run against the
-real BEV server**, which is why `auto` does not use this source: try it with
-`--source austria` first, and report any failure. Each tile is 50 km wide and is
-never downloaded whole. The working CRS is the source CRS (EPSG:3035); its scale
+format of its entries and the idea that the COGs declare an unusable CRS come
+from the open-source `geostl` project; as a precaution, the tool therefore wraps
+each tile in a small local VRT that forces EPSG:3035 (without having checked that
+this is necessary). **It has been run against the real BEV server at two places
+only** (October 2026, series of 15.09.2025, both in high mountains): the
+Grossglockner (one tile) and an area straddling the boundary between two tiles
+(E = 4,550,000 m, vertical seam); in both cases the STL is watertight
+(`check_stl.py`) and the seam is invisible on the preview. Not yet tried: a flat
+area in the east, Vorarlberg, a four-tile corner, a radius of several tens of km.
+This is why `auto` does not use this source: elsewhere, try `--source austria`
+first and report any failure. Each tile is 50 km wide and is never downloaded
+whole. The working CRS is the source CRS (EPSG:3035); its scale
 distortion over Austria is at most about 0.08 % (measured at six points with GDAL
 3.8.4), i.e. 0.15 mm on a 200 mm model. The BEV height accuracy is generally
 ±0.5 m, more in high mountains (provider's record).
