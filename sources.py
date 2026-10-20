@@ -23,18 +23,23 @@ proche plutôt que de télécharger du 1 m inutile.
   - GSI : TESTÉ EN RÉEL (Mont Fuji) : la couche `dem1a_png` répond bien.
   - IGN : WMS-R Géoplateforme (annexe officielle lue), couche LiDAR HD brute
     non confirmée sur serveur ; repli RGE ALTI.
+  - BEV (Autriche) : licence, résolution et service ATOM lus sur la fiche officielle ; adresse du
+    flux, forme des titres et CRS erroné des COG repris du dépôt geostl (MIT), JAMAIS essayés
+    sur le serveur réel. Hors de `auto` : à demander explicitement (--source austria).
 """
 import email.utils
 import http.client
 import json
 import math
 import os
+import re
 import shutil
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Tuple
@@ -797,6 +802,128 @@ def fetch_gsi(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
 
 
 # ---------------------------------------------------------------------------
+# BEV Autriche — MNT laser aéroporté 1 m (flux ATOM INSPIRE, COG en EPSG:3035)
+# ---------------------------------------------------------------------------
+# Lu sur la fiche officielle du BEV (série « ALS DTM Höhenraster 1m ») : licence CC-BY-4.0, MNT 1 m
+# (hors végétation) sur tout le pays en 55 dalles, GeoTIFF/COG, téléchargement par service ATOM.
+# Repris du dépôt geostl (MIT) et NON vérifié sur le serveur réel : l'adresse du flux, la forme des
+# titres (« ALS DTM CRS3035RES50000mN2700000E4600000 Höhenraster 1m Stichtag 15.09.2025 »), les
+# liens atom, et le fait que les COG déclarent un CRS erroné (d'où le VRT qui impose EPSG:3035).
+# Une dalle fait 50 km de côté : elle n'est JAMAIS téléchargée en entier, GDAL ne lit que la fenêtre
+# demandée (et les aperçus du COG quand la grille de travail est plus grossière que 1 m).
+
+BEV_ATOM_SERVICE = ("https://data.bev.gv.at/geonetwork/srv/atom/describe/service"
+                    "?uuid=208cff7a-c8aa-42fe-bf4f-2b8156e37528")
+BEV_EPSG = 3035
+BEV_MARGIN_M = 2000.0
+BEV_BOX = (9.4, 46.3, 17.3, 49.1)   # Autriche, marge comprise (lon_min, lat_min, lon_max, lat_max)
+_ATOM = "{http://www.w3.org/2005/Atom}"
+_BEV_TITLE = re.compile(r"ALS\s+DTM\s+CRS3035RES(?P<res>\d+)mN(?P<n>\d+)E(?P<e>\d+)\b.*?"
+                        r"Stichtag\s+(?P<d>\d{2})\.(?P<m>\d{2})\.(?P<y>\d{4})")
+
+
+def _atom_root(data, what):
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError as e:
+        raise SourceUnavailable(f"BEV : {what} illisible ({e})")
+
+
+def parse_bev_service_feed(data):
+    """Dalles du MNT (« DTM », pas le MNS) listées par le flux du service : une entrée par dalle ET par
+    Stichtag (date de la série). Renvoie des dicts {tile, x0, y0, size, date, feed} : coin bas-gauche
+    (x0, y0) et côté (size) en mètres EPSG:3035, lus dans le nom de la dalle ; date AAAAMMJJ ; feed =
+    adresse du flux de la dalle. Les entrées qui ne suivent pas ce schéma sont ignorées."""
+    out = []
+    for entry in _atom_root(data, "flux ATOM du service").iter(f"{_ATOM}entry"):
+        m = _BEV_TITLE.search(entry.findtext(f"{_ATOM}title") or "")
+        if not m:
+            continue
+        feed = next((link.get("href") for link in entry.findall(f"{_ATOM}link")
+                     if (link.get("type") or "").startswith("application/atom+xml") and link.get("href")), None)
+        if feed:
+            out.append({"tile": f"RES{m['res']}mN{m['n']}E{m['e']}", "x0": float(m["e"]), "y0": float(m["n"]),
+                        "size": float(m["res"]), "date": f"{m['y']}{m['m']}{m['d']}", "feed": feed})
+    return out
+
+
+def select_bev_tiles(entries, bounds):
+    """Dalles qui recoupent `bounds` = (xmin, ymin, xmax, ymax) en EPSG:3035, une seule série par dalle :
+    la plus récente (chaque Stichtag est un jeu complet du pays, d'après la fiche). Triées par nom."""
+    xmin, ymin, xmax, ymax = bounds
+    best = {}
+    for e in entries:
+        if e["x0"] >= xmax or e["x0"] + e["size"] <= xmin or e["y0"] >= ymax or e["y0"] + e["size"] <= ymin:
+            continue
+        if e["tile"] not in best or e["date"] > best[e["tile"]]["date"]:
+            best[e["tile"]] = e
+    return [best[k] for k in sorted(best)]
+
+
+def bev_tile_urls(data):
+    """Adresses des GeoTIFF listés dans le flux d'une dalle (lien de type image/tiff, ou nom en .tif)."""
+    urls = []
+    for link in _atom_root(data, "flux ATOM de la dalle").iter(f"{_ATOM}link"):
+        href = link.get("href") or ""
+        if href and ("tiff" in (link.get("type") or "").lower()
+                     or urllib.parse.urlparse(href).path.lower().endswith((".tif", ".tiff"))):
+            urls.append(href)
+    return list(dict.fromkeys(urls))
+
+
+def _vsicurl(url):
+    return url if url.startswith("/vsi") else "/vsicurl/" + url
+
+
+def _bev_vrt(url, dest):
+    """VRT local (quelques ko) qui pointe sur la dalle distante en lui imposant EPSG:3035, sans rien lire
+    de ses pixels : les COG du BEV déclareraient un CRS « ingénierie » inutilisable (d'après geostl)."""
+    if os.path.exists(dest):
+        return dest
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    try:
+        gdal.Translate(tmp, _vsicurl(url), format="VRT", outputSRS=f"EPSG:{BEV_EPSG}")
+    except RuntimeError as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        reason = str(e).strip().splitlines()[0] if str(e).strip() else "erreur GDAL"
+        raise SourceUnavailable(f"BEV : dalle illisible {url} ({reason})")
+    os.replace(tmp, dest)
+    return dest
+
+
+def fetch_austria(lat, lon, radius_m, cache_dir, pixel_size_m, log=print):
+    cx, cy = _to_epsg(BEV_EPSG, lat, lon)
+    half = radius_m + BEV_MARGIN_M
+    data = _http_get(BEV_ATOM_SERVICE)
+    if data is None:
+        raise SourceUnavailable(f"{BEV_ATOM_SERVICE} : HTTP 404")
+    entries = parse_bev_service_feed(data)
+    if not entries:
+        raise SourceUnavailable("BEV : aucune dalle « ALS DTM » reconnue dans le flux ATOM (format changé ?)")
+    chosen = select_bev_tiles(entries, (cx - half, cy - half, cx + half, cy + half))
+    if not chosen:
+        raise NoCoverage("BEV : aucune dalle de MNT 1 m pour cette zone (hors Autriche ?)")
+    log(f"BEV MNT 1 m : {len(chosen)} dalle(s) de {chosen[0]['size'] / 1000:g} km, lecture partielle via /vsicurl/, "
+        f"série du {', '.join(sorted({e['date'] for e in chosen}))} (pixel de travail {pixel_size_m:.2f} m)")
+    out = []
+    for e in chosen:
+        feed = _http_get(e["feed"])
+        if feed is None:
+            raise SourceUnavailable(f"{e['feed']} : HTTP 404")
+        urls = bev_tile_urls(feed)
+        if not urls:
+            raise SourceUnavailable(f"BEV : aucun GeoTIFF dans le flux de la dalle {e['tile']} ({e['feed']})")
+        for u in urls:
+            stem = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.splitext(os.path.basename(urllib.parse.urlparse(u).path))[0])
+            dest = os.path.join(cache_dir, "austria", f"{e['tile']}_{e['date']}_{stem}.vrt")
+            log(f"  {os.path.basename(dest)} : {'en cache' if os.path.exists(dest) else 'création du VRT (EPSG:3035)...'}")
+            out.append(_bev_vrt(u, dest))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Registre, sélection automatique
 # ---------------------------------------------------------------------------
 
@@ -819,7 +946,10 @@ SOURCES = {s.name: s for s in [
             (-161.0, 18.8, -154.7, 22.4), (-67.4, 17.8, -65.1, 18.6)], fetch_usgs),
     Source("gsi", "GSI tuiles d'élévation (Japon)", [(122.9, 24.0, 146.0, 45.6)], fetch_gsi),
     Source("ign", "IGN MNT LiDAR HD / RGE ALTI (France)", list(IGN_REGION_BOXES.values()), fetch_ign),
+    Source("austria", "BEV MNT laser aéroporté 1 m (Autriche)", [BEV_BOX], fetch_austria),
 ]}
+# « austria » n'est volontairement pas dans AUTO_ORDER : écrite d'après la fiche du BEV et le dépôt geostl,
+# jamais essayée sur le serveur réel. À réserver à --source austria tant qu'un essai réel n'a pas eu lieu.
 AUTO_ORDER = ["swisstopo", "kartverket", "usgs", "gsi", "ign"]
 
 

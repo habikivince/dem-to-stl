@@ -404,6 +404,7 @@ python circle_dem_to_stl.py --source auto --lat 46.0 --lon 7.6 --radius 5000 --o
 | `usgs` | 3DEP (United States) | TNM Access API, partial reads via `/vsicurl/` |
 | `gsi` | GSI elevation tiles (Japan) | PNG tiles (DEM1A → DEM5A/5B → DEM10B), Web Mercator |
 | `ign` | LiDAR HD MNT 0.5 m, fallback RGE ALTI 1 m (France, La Réunion) | WMS-R, raw float GeoTIFF; rendered/hillshade answers are rejected |
+| `austria` | BEV airborne-laser DTM 1 m (Austria) | INSPIRE ATOM feed, 50 km Cloud-Optimized GeoTIFF tiles (EPSG:3035), partial reads via `/vsicurl/`; **explicit only**: `auto` never tries it |
 | `copernicus` | GLO-30/90 (worldwide) | same as `--download-copernicus` |
 | `auto` | national source covering the point, otherwise Copernicus | — |
 
@@ -418,6 +419,18 @@ Kartverket coverage name in particular should be confirmed on first real
 use. Kartverket and IGN (WCS/WMS servers whose exact request syntax could not be confirmed) try several request variants and log the one accepted; IGN LiDAR HD coverage of France is still incomplete (a warning reports the share of the disc without data). GSI's FGD XML
 download requires a login and is not automated; the tile service is used
 instead (interpolated values, not the raw JPGIS mesh).
+
+`austria` (BEV): licence (CC BY 4.0), 1 m resolution and the ATOM download
+service come from the provider's official record; the feed address, the title
+format of its entries and the fact that the COGs declare an unusable CRS (the
+tool therefore wraps each tile in a small local VRT that forces EPSG:3035) come
+from the open-source `geostl` project. **None of this has been run against the
+real BEV server**, which is why `auto` does not use this source: try it with
+`--source austria` first, and report any failure. Each tile is 50 km wide and is
+never downloaded whole. The working CRS is the source CRS (EPSG:3035); its scale
+distortion over Austria is at most about 0.08 % (measured at six points with GDAL
+3.8.4), i.e. 0.15 mm on a 200 mm model. The BEV height accuracy is generally
+±0.5 m, more in high mountains (provider's record).
 
 ### Place names (`--place`)
 
@@ -616,6 +629,7 @@ model built from them. Wording checked against each provider's own pages in Octo
 | swisstopo (swissALTI3D) | Open Government Data: free use, including commercial | Mandatory: "© swisstopo" or "Federal Office of Topography swisstopo" |
 | IGN (LiDAR HD, RGE ALTI) | Licence Ouverte Etalab 2.0 (open data) | Source "IGN"; RGE ALTI is less accurate on steep terrain (about 7 m vertical, per the Earth Engine catalogue) |
 | Kartverket (Høydedata DTM1) | CC BY 4.0 | Credit Kartverket |
+| BEV (Austria, airborne-laser DTM 1 m) | CC BY 4.0 (stated on the provider's record) | "© BEV – Bundesamt für Eich- und Vermessungswesen"; the record prescribes no credit line, and CC BY also asks you to indicate changes |
 | USGS 3DEP | Public domain | Credit requested ("U.S. Geological Survey, 3D Elevation Program") |
 | GSI Japan (elevation tiles) | GSI content terms (PDL 1.0) | State the source (出典:国土地理院ウェブサイト) **and** that the data was processed, e.g. "地理院タイル (標高タイル(基盤地図情報数値標高モデル))を加工して作成"; never present it as made by GSI |
 | Copernicus DEM GLO-30 | Free licence | "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved" when adapted; the licence also asks for a no-liability notice when distributing |

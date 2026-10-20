@@ -122,6 +122,7 @@ SOURCE_ATTRIBUTION = {
     "kartverket": "© Kartverket (CC BY 4.0)",
     "usgs": "U.S. Geological Survey, 3D Elevation Program",
     "gsi": "出典:国土地理院ウェブサイト 地理院タイル(標高タイル)を加工して作成",
+    "austria": "© BEV – Bundesamt für Eich- und Vermessungswesen (CC BY 4.0)",
     "copernicus": ("produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and "
                    "Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved"),
     "osm": "© OpenStreetMap contributors (ODbL)",

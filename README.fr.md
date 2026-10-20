@@ -406,6 +406,7 @@ python circle_dem_to_stl.py --source auto --lat 46.0 --lon 7.6 --radius 5000 --o
 | `usgs` | 3DEP (États-Unis) | API TNM Access, lecture partielle via `/vsicurl/` |
 | `gsi` | Tuiles d'élévation GSI (Japon) | tuiles PNG (DEM1A → DEM5A/5B → DEM10B), Web Mercator |
 | `ign` | MNT LiDAR HD 0,5 m, repli RGE ALTI 1 m (France, La Réunion) | WMS-R, GeoTIFF flottant brut ; les images rendues/estompées sont rejetées |
+| `austria` | MNT laser aéroporté 1 m du BEV (Autriche) | flux ATOM INSPIRE, dalles Cloud-Optimized GeoTIFF de 50 km (EPSG:3035), lecture partielle via `/vsicurl/` ; **explicite seulement** : `auto` ne l'essaie jamais |
 | `copernicus` | GLO-30/90 (monde) | identique à `--download-copernicus` |
 | `auto` | source nationale couvrant le point, sinon Copernicus | — |
 
@@ -421,6 +422,19 @@ Les noms de jeux de données USGS et le nom de couverture Kartverket en
 particulier sont à confirmer au premier usage réel. Kartverket et IGN (serveurs WCS/WMS dont la syntaxe exacte n'a pas pu être confirmée) essaient plusieurs variantes de requête et journalisent celle acceptée ; la couverture LiDAR HD de la France est encore incomplète (un avertissement indique la part du disque sans donnée). Le téléchargement XML FGD de
 GSI exige un compte et n'est pas automatisé ; le service de tuiles est
 utilisé à la place (valeurs interpolées, pas le maillage JPGIS brut).
+
+`austria` (BEV) : la licence (CC BY 4.0), la résolution de 1 m et le service de
+téléchargement ATOM viennent de la fiche officielle du fournisseur ; l'adresse du
+flux, la forme des titres de ses entrées et le fait que les COG déclarent un CRS
+inutilisable (l'outil enveloppe donc chaque dalle dans un petit VRT local qui impose
+EPSG:3035) viennent du projet libre `geostl`. **Rien de tout cela n'a été essayé sur
+le vrai serveur du BEV**, d'où l'absence de cette source dans `auto` : essaie d'abord
+`--source austria` et signale tout échec. Chaque dalle fait 50 km de côté et n'est
+jamais téléchargée en entier. Le CRS de travail est celui de la source (EPSG:3035) ;
+sa distorsion d'échelle sur l'Autriche est d'au plus 0,08 % environ (mesurée en six
+points avec GDAL 3.8.4), soit 0,15 mm sur un modèle de 200 mm. La précision en
+hauteur du BEV est en général de ±0,5 m, davantage en haute montagne (fiche du
+fournisseur).
 
 ### Noms de lieux (`--place`)
 
@@ -633,6 +647,7 @@ vérifie les conditions en vigueur avant de publier.
 | swisstopo (swissALTI3D) | Open Government Data : usage libre, y compris commercial | Obligatoire : « © swisstopo » ou « Office fédéral de topographie swisstopo » |
 | IGN (LiDAR HD, RGE ALTI) | Licence Ouverte Etalab 2.0 (données ouvertes) | Source « IGN » ; RGE ALTI est moins précis sur les fortes pentes (environ 7 m en vertical, d'après le catalogue Earth Engine) |
 | Kartverket (Høydedata DTM1) | CC BY 4.0 | Créditer Kartverket |
+| BEV (Autriche, MNT laser aéroporté 1 m) | CC BY 4.0 (indiquée sur la fiche du fournisseur) | « © BEV – Bundesamt für Eich- und Vermessungswesen » ; la fiche ne prescrit pas de formule, et la CC BY demande aussi d'indiquer les modifications |
 | USGS 3DEP | Domaine public | Mention demandée (« U.S. Geological Survey, 3D Elevation Program ») |
 | GSI Japon (tuiles d'élévation) | Conditions d'utilisation des contenus de la GSI (PDL 1.0) | Indiquer la source (出典:国土地理院ウェブサイト) **et** la transformation des données, par ex. « 地理院タイル (標高タイル(基盤地図情報数値標高モデル))を加工して作成 » ; ne jamais présenter le résultat comme produit par la GSI |
 | Copernicus DEM GLO-30 | Licence gratuite | « produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved » en cas de modification ; la licence demande aussi une mention d'exclusion de responsabilité à la diffusion |

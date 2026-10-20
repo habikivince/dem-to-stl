@@ -745,3 +745,200 @@ def test_compare_dems_ignores_filled_halo_of_the_smaller_raster(tmp_path):
     assert s["cells_only_b"] > 0.4 * s["cells_disc"]   # la moitié est du disque n'existe que dans B
     assert s["cells_only_a"] == 0
     assert s["max_abs"] < 0.5                           # aucune différence inventée par le comblement
+
+
+# ---------------------------------------------------------------- BEV Autriche
+# Le flux ATOM du BEV est simulé d'après le format décrit par le dépôt geostl (jamais vu en réel).
+# Les dalles « distantes » sont des GeoTIFF locaux : GDAL, lui, est réel (création du VRT, lecture).
+
+BEV_ENG_WKT = ('ENGCRS["Arbitrary",EDATUM["unknown"],CS[Cartesian,2],'
+               'AXIS["x",east],AXIS["y",north],LENGTHUNIT["metre",1]]')
+BEV_T = "CRS3035RES50000mN2650000E4650000"
+
+
+def _bev_entry(tile, stichtag, feed, model="DTM"):
+    return (f"<entry><title>ALS {model} {tile} Höhenraster 1m Stichtag {stichtag}</title>"
+            f'<link type="application/atom+xml" rel="alternate" href="{feed}"/>'
+            "<georss:polygon>47.3 13.9 47.8 13.9 47.8 14.7 47.3 14.7 47.3 13.9</georss:polygon></entry>")
+
+
+def _bev_service(*entries):
+    return ('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:georss="http://www.georss.org/georss">'
+            + "".join(entries) + "</feed>").encode("utf-8")
+
+
+def _bev_dataset(*hrefs):
+    return ('<feed xmlns="http://www.w3.org/2005/Atom">'
+            + "".join(f'<entry><link rel="alternate" type="image/tiff" href="{h}"/></entry>' for h in hrefs)
+            + "</feed>").encode("utf-8")
+
+
+def _write_bev_tif(path, cx, cy, half=1500.0):
+    """Dalle de 2*half m de côté, pixels de 1 m, centrée sur (cx, cy), avec un CRS « ingénierie » inutilisable."""
+    n = int(2 * half)
+    xx, yy = np.meshgrid(np.arange(n), np.arange(n))
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), n, n, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform([cx - half, 1.0, 0.0, cy + half, 0.0, -1.0])
+    ds.SetProjection(BEV_ENG_WKT)
+    ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    ds.GetRasterBand(1).WriteArray((1500.0 + 0.05 * xx + 0.02 * yy).astype(np.float32))
+    ds = None
+
+
+def _epsg_code(ds):
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(ds.GetProjection())
+    return srs.GetAuthorityCode(None)
+
+
+@pytest.fixture
+def bev_net(tmp_path, monkeypatch):
+    import types
+    lat, lon = 47.07, 12.69
+    cx, cy = sources._to_epsg(3035, lat, lon)
+    x0, y0 = math.floor(cx / 50000) * 50000, math.floor(cy / 50000) * 50000
+    tile = f"CRS3035RES50000mN{y0}E{x0}"
+    tif = tmp_path / "remote" / "dtm_tile.tif"
+    tif.parent.mkdir()
+    _write_bev_tif(tif, cx, cy)
+    feeds = {
+        sources.BEV_ATOM_SERVICE: _bev_service(
+            _bev_entry(tile, "15.09.2019", "http://feed/old"),
+            _bev_entry(tile, "15.09.2025", "http://feed/new"),
+            _bev_entry(tile, "15.09.2025", "http://feed/dsm", model="DSM"),
+            _bev_entry("CRS3035RES50000mN2900000E4900000", "15.09.2025", "http://feed/far")),
+        "http://feed/old": _bev_dataset("https://data/old.tif"),
+        "http://feed/new": _bev_dataset("https://data/new.tif"),
+        "http://feed/dsm": _bev_dataset("https://data/dsm.tif"),
+        "http://feed/far": _bev_dataset("https://data/far.tif"),
+    }
+    gets, opened = [], []
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: gets.append(url) or feeds.get(url))
+    monkeypatch.setattr(sources, "_vsicurl", lambda url: opened.append(url) or str(tif))
+    return types.SimpleNamespace(lat=lat, lon=lon, tile=tile, tif=tif, gets=gets, opened=opened)
+
+
+def test_bev_parse_service_feed_reads_tile_geometry_and_date_and_ignores_dsm_and_junk():
+    xml = _bev_service(
+        _bev_entry(BEV_T, "15.09.2025", "http://f/1"),
+        _bev_entry(BEV_T, "15.09.2025", "http://f/2", model="DSM"),
+        "<entry><title>autre chose</title></entry>",
+        f"<entry><title>ALS DTM {BEV_T} Höhenraster 1m Stichtag 01.01.2020</title></entry>")  # sans lien : ignorée
+    assert sources.parse_bev_service_feed(xml) == [
+        {"tile": "RES50000mN2650000E4650000", "x0": 4650000.0, "y0": 2650000.0, "size": 50000.0,
+         "date": "20250915", "feed": "http://f/1"}]
+
+
+def test_bev_select_tiles_keeps_latest_series_and_ignores_touching_edges():
+    def mk(x0, y0, d):
+        return {"tile": f"RES50000mN{y0}E{x0}", "x0": x0, "y0": y0, "size": 50000.0, "date": d, "feed": d}
+    entries = [mk(4600000, 2700000, "20190915"), mk(4600000, 2700000, "20250915"), mk(4650000, 2700000, "20250915")]
+    got = sources.select_bev_tiles(entries, (4640000, 2710000, 4660000, 2720000))   # à cheval sur deux dalles
+    assert [(e["x0"], e["date"]) for e in got] == [(4600000, "20250915"), (4650000, "20250915")]
+    assert sources.select_bev_tiles(entries, (4700000, 2710000, 4710000, 2720000)) == []   # au-delà du bord
+
+
+def test_bev_tile_urls_accepts_tiff_type_or_tif_extension_and_removes_duplicates():
+    xml = ('<feed xmlns="http://www.w3.org/2005/Atom"><link rel="self" type="application/atom+xml" href="http://f/self"/>'
+           '<entry><link type="image/tiff" href="http://d/a"/></entry>'
+           '<entry><link type="application/octet-stream" href="http://d/b.TIF?x=1"/></entry>'
+           '<entry><link type="image/tiff" href="http://d/a"/></entry>'
+           '<entry><link type="text/html" href="http://d/page"/></entry></feed>').encode()
+    assert sources.bev_tile_urls(xml) == ["http://d/a", "http://d/b.TIF?x=1"]
+
+
+def test_bev_vsicurl_prefix():
+    assert sources._vsicurl("https://x/a.tif") == "/vsicurl/https://x/a.tif"
+    assert sources._vsicurl("/vsimem/a.tif") == "/vsimem/a.tif"
+
+
+def test_bev_fetch_takes_latest_dtm_and_imposes_epsg3035_on_a_tile_with_unusable_crs(tmp_path, bev_net):
+    out = sources.fetch_austria(bev_net.lat, bev_net.lon, 1000, str(tmp_path / "c"), 10.0, log=quiet)
+    assert len(out) == 1 and out[0].endswith(".vrt")
+    # série la plus récente, MNT (pas MNS), seule dalle voisine (la lointaine n'est pas touchée)
+    assert bev_net.opened == ["https://data/new.tif"]
+    assert "http://feed/far" not in bev_net.gets and "http://feed/dsm" not in bev_net.gets
+    raw, vrt = gdal.Open(str(bev_net.tif)), gdal.Open(out[0])
+    assert _epsg_code(raw) is None            # prémisse : le CRS de la dalle seule est inutilisable
+    assert _epsg_code(vrt) == "3035"
+    assert vrt.GetGeoTransform() == raw.GetGeoTransform()
+    np.testing.assert_array_equal(vrt.GetRasterBand(1).ReadAsArray(), raw.GetRasterBand(1).ReadAsArray())
+    assert vrt.GetRasterBand(1).GetNoDataValue() == -9999.0
+    assert not [p for p in os.listdir(tmp_path / "c" / "austria") if p.endswith(".part")]
+
+
+def test_bev_second_call_reuses_the_cached_vrt(tmp_path, bev_net):
+    a = sources.fetch_austria(bev_net.lat, bev_net.lon, 1000, str(tmp_path / "c"), 10.0, log=quiet)
+    n = len(bev_net.opened)
+    b = sources.fetch_austria(bev_net.lat, bev_net.lon, 1000, str(tmp_path / "c"), 10.0, log=quiet)
+    assert a == b and len(bev_net.opened) == n      # VRT en cache : la dalle distante n'est pas rouverte
+
+
+def test_bev_area_without_tile_is_no_coverage(tmp_path, bev_net):
+    with pytest.raises(sources.NoCoverage):
+        sources.fetch_austria(48.8, 2.3, 1000, str(tmp_path / "c"), 10.0, log=quiet)   # Paris
+
+
+def test_bev_feed_problems_are_reported_as_source_unavailable(tmp_path, bev_net, monkeypatch):
+    def run():
+        return sources.fetch_austria(bev_net.lat, bev_net.lon, 1000, str(tmp_path / "c"), 10.0, log=quiet)
+
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: b'<feed xmlns="http://www.w3.org/2005/Atom"/>')
+    with pytest.raises(sources.SourceUnavailable, match="aucune dalle"):      # format du flux inattendu
+        run()
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: b"<html>")
+    with pytest.raises(sources.SourceUnavailable, match="illisible"):
+        run()
+    monkeypatch.setattr(sources, "_http_get", lambda url, **k: None)
+    with pytest.raises(sources.SourceUnavailable, match="404"):
+        run()
+    service = _bev_service(_bev_entry(bev_net.tile, "15.09.2025", "http://feed/new"))
+    monkeypatch.setattr(sources, "_http_get",
+                        lambda url, **k: service if url == sources.BEV_ATOM_SERVICE else _bev_dataset())
+    with pytest.raises(sources.SourceUnavailable, match="aucun GeoTIFF"):
+        run()
+
+
+def test_bev_unreadable_tile_is_source_unavailable_and_leaves_no_partial_file(tmp_path, bev_net, monkeypatch):
+    monkeypatch.setattr(sources, "_vsicurl", lambda url: str(tmp_path / "inexistant.tif"))
+    with pytest.raises(sources.SourceUnavailable, match="illisible"):
+        sources.fetch_austria(bev_net.lat, bev_net.lon, 1000, str(tmp_path / "c"), 10.0, log=quiet)
+    assert not os.listdir(tmp_path / "c" / "austria")
+
+
+def test_bev_is_selectable_but_never_tried_by_auto(tmp_path, monkeypatch, fake_copernicus):
+    assert "austria" in sources.SOURCES and "austria" not in sources.AUTO_ORDER
+    assert sources.SOURCES["austria"].covers(47.07, 12.69) and not sources.SOURCES["austria"].covers(48.8, 2.3)
+
+    def boom(*a, **k):
+        raise AssertionError("auto ne doit pas interroger le BEV")
+    monkeypatch.setitem(sources.SOURCES, "austria", sources.Source("austria", "x", [(9, 46, 18, 50)], boom))
+    name, _ = sources.acquire("auto", 47.07, 12.69, 1000, str(tmp_path), 10.0, log=quiet)
+    assert name == "copernicus"
+
+
+def test_cli_with_austria_source_end_to_end_and_credit_in_3mf(tmp_path, monkeypatch, bev_net):
+    import zipfile
+    out = tmp_path / "at.stl"
+    monkeypatch.setattr(sys, "argv", [
+        "circle_dem_to_stl.py", "--source", "austria", "--lat", str(bev_net.lat), "--lon", str(bev_net.lon),
+        "--radius", "500", "--diameter-mm", "50", "--vexag", "1", "--base-mm", "2", "--print-spacing-mm", "0.5",
+        "--format", "stl,3mf", "--output", str(out), "--cache-dir", str(tmp_path / "c")])
+    circle_dem_to_stl.main()
+    assert out.stat().st_size > 84
+    with zipfile.ZipFile(out.with_suffix(".3mf")) as z:
+        assert "BEV" in z.read("3D/3dmodel.model").decode("utf-8")
+
+
+def test_bev_tile_within_the_2_km_margin_of_the_disc_is_taken_but_not_beyond(tmp_path, bev_net):
+    cx, cy = sources._to_epsg(3035, bev_net.lat, bev_net.lon)
+    x0, y0 = math.floor(cx / 50000) * 50000, math.floor(cy / 50000) * 50000
+    to_geo = osr.CoordinateTransformation(sources._srs(3035), sources._srs(4326))
+
+    def fetch_from(dx):   # centre du disque à dx mètres à l'ouest de la dalle de l'annuaire, rayon 100 m
+        lon, lat, _ = to_geo.TransformPoint(x0 - dx, y0 + 25000)
+        return sources.fetch_austria(lat, lon, 100, str(tmp_path / "c"), 10.0, log=quiet)
+
+    assert len(fetch_from(1500.0)) == 1          # le disque ne touche pas la dalle, sa marge de 2 km si
+    with pytest.raises(sources.NoCoverage):
+        fetch_from(2500.0)                       # au-delà de la marge
