@@ -216,6 +216,7 @@ python circle_dem_to_stl.py \
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
+| `--extrapolate-edges` | Prolonge le relief sur 50 pixels de travail au plus au-delà des données (ancien comblement) ; les cellules inventées sont journalisées | désactivé |
 | `--download-copernicus` | Télécharge les tuiles Copernicus DEM nécessaires au lieu de fournir `--input` | désactivé |
 | `--copernicus-product` | Résolution Copernicus à télécharger : `30` (GLO-30) ou `90` (GLO-90) | 30 |
 | `--cache-dir` | Dossier de cache des tuiles Copernicus téléchargées | `./copernicus_cache` |
@@ -289,10 +290,14 @@ ceux qui ont réellement été testés.
 * **Aucun changement silencieux de datum vertical.** Un CRS composé (p. ex. EPSG:2056+5728)
   voit sa partie verticale ignorée pour le positionnement, et le journal dit qu'aucune
   conversion géoïde/ellipsoïde n'a été faite.
-* **Le NoData n'est jamais zéro.** NoData déclaré, NaN/inf, vides SRTM et zone hors de
-  l'emprise du fichier restent du NoData. Les trous jusqu'à 50 pixels sont comblés (le nombre
-  de cellules comblées est journalisé) ; au-delà, ils sont exclus du modèle. Les sources
-  entières sont ré-échantillonnées en virgule flottante.
+* **Le NoData n'est jamais zéro, et le relief n'est pas prolongé au-delà des données.** NoData
+  déclaré, NaN/inf, vides SRTM et zone hors de l'emprise du fichier restent du NoData. Seuls les
+  trous sont comblés (le nombre de cellules comblées est journalisé) : zones entourées de données
+  ou qui traversent la fenêtre de part en part (rivière, joint entre deux dalles), à 50 pixels au
+  plus d'une donnée. Tout le reste est exclu du modèle : la zone au-delà du bord du fichier, la mer
+  d'une source qui la laisse vide, toute zone plus grande. Voir
+  [Trous et bord des données](#trous-et-bord-des-données). Les sources entières sont
+  ré-échantillonnées en virgule flottante.
 * **Aucun sous-échantillonnage silencieux**, et le journal affiche une ligne `entrée ...` par
   fichier : format, taille, type, CRS, unité, et quelle bande/variable/couche a été choisie.
 
@@ -533,6 +538,29 @@ une grille quasi identique.
   entre deux DEM sur la grille de travail (décalage moyen, RMS, 95e centile), pour
   valider une source automatique contre des données téléchargées à la main.
 
+### Trous et bord des données
+
+Les cellules de la zone sans donnée sont traitées de deux façons :
+
+* **Les trous** (vides, bande manquante entre deux dalles, rivière laissée vide par la source) sont
+  comblés par interpolation pondérée par l'inverse de la distance (`gdal.FillNodata`), à condition
+  d'être entourés de données ou de traverser la fenêtre de part en part, et qu'aucune cellule ne soit
+  à plus de 50 pixels de travail d'une donnée. Le nombre de cellules comblées est journalisé.
+* **Tout le reste** reste vide : la zone au-delà du bord du fichier, la mer d'une source qui la laisse
+  sans donnée, une grande zone manquante. Un disque coupé par le bord du
+  fichier est donc tronqué au lieu d'être complété, ce que `--preview` montre ; avec `--sea-level`,
+  ces cellules deviennent de la mer. Le journal compte les cellules de la zone que l'ancien comblement
+  aurait prolongées depuis le bord des données.
+
+L'ancien comblement prolongeait le relief sur 50 pixels de travail au-delà des données. Avec
+`--print-spacing-mm 0.2` (valeur par défaut), cela fait 10 mm sur la pièce imprimée, quel que soit le
+rayon, et c'était du relief inventé : sur une côte à falaise, par exemple, un plateau à la hauteur de la
+falaise avançait dans la mer. `--extrapolate-edges` le rétablit (le journal indique alors combien de
+cellules ont été extrapolées). Avec `--sides`, une forme qui dépasse les données est refusée, comme
+avant ; `--extrapolate-edges` l'accepte quand le dépassement tient dans 50 pixels. L'option est sans
+effet sur une entrée LAS/LAZ, qui ne s'étend jamais au-delà des points (voir `--lidar-interp`). Le JSON
+de `--report` compte ces cellules dans `source.no_data`.
+
 ### Combler les trous avec Copernicus (`--fill-with-copernicus`)
 
 Les sources nationales s'arrêtent à leur frontière (par ex. swissALTI3D côté
@@ -714,7 +742,7 @@ décide. Le relief demande les données : `--dry-run` ne peut pas l'afficher.
 
 `--report` (éventuellement `--report fichier.json` ; par défaut à côté du modèle, même nom en `.json`)
 écrit un JSON avec la source et sa mention de licence, l'échelle, le relief, l'exagération, les nombres de
-triangles, les options de maillage et la ligne de commande. Il est écrit après les modèles ; s'il ne peut pas
+triangles, les options de maillage, les cellules sans donnée (`source.no_data`) et la ligne de commande. Il est écrit après les modèles ; s'il ne peut pas
 l'être, un avertissement est affiché et les modèles sont conservés.
 
 ### Aperçu ombré (`--preview`)
@@ -760,6 +788,13 @@ cohérence des normales, et le comportement attendu de chaque option.
 
 ## Historique des changements notables
 
+- **Plus de relief au-delà des données. Changement de comportement** : `gdal.FillNodata` prolongeait le
+  relief sur 50 pixels de travail au-delà des données (10 mm sur la pièce imprimée avec le
+  `--print-spacing-mm` par défaut), hors de l'emprise du fichier et autour d'une grande zone vide (une mer
+  laissée sans donnée). Seuls les trous sont désormais comblés ; `--extrapolate-edges` rétablit l'ancien
+  comportement, et le journal comme le JSON de `--report` comptent les cellules concernées
+  (`tests/test_fill_edges.py`). Un disque coupé par le bord du fichier est tronqué, et une forme `--sides`
+  qui dépasse les données est refusée sans `--extrapolate-edges`.
 - **`--preview`** : aperçu ombré PNG de la zone découpée, écrit avant le maillage
   (`tests/test_preview.py`, `tests/test_preview_cli.py`).
 - **`check_stl.py` : coques, caractéristique d'Euler et triangles retournés** (`--expect-shells`,

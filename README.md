@@ -212,6 +212,7 @@ segment; the file name gets a `_courbe` suffix. With a curve, `check_stl.py --re
 | `--sea-level` | Enables island mode at this elevation (m) | disabled |
 | `--min-elevation` | Threshold for excluding interpolation artifacts, in m | -50 |
 | `--land-threshold` | Land/water-noise threshold above `--sea-level`, in m | 1.0 |
+| `--extrapolate-edges` | Extends the relief by up to 50 working pixels beyond the data (former gap filling); invented cells are logged | disabled |
 | `--download-copernicus` | Downloads the needed Copernicus DEM tiles instead of providing `--input` | disabled |
 | `--copernicus-product` | Copernicus resolution to download: `30` (GLO-30) or `90` (GLO-90) | 30 |
 | `--cache-dir` | Cache folder for downloaded Copernicus tiles | `./copernicus_cache` |
@@ -286,10 +287,14 @@ add**. The three levels below are what was actually tested.
 * **No silent vertical datum change.** A compound CRS (e.g. EPSG:2056+5728) has its
   vertical part ignored for positioning and the log says no geoid/ellipsoid
   conversion was applied.
-* **NoData is never zero.** A declared NoData, NaN/inf, SRTM voids and the area outside
-  the file's footprint all stay NoData. Gaps up to 50 pixels are filled (the number of
-  filled cells is logged); anything larger is left out of the model. Integer
-  sources are resampled in floating point.
+* **NoData is never zero, and the relief is not extended beyond the data.** A declared
+  NoData, NaN/inf, SRTM voids and the area outside the file's footprint all stay NoData.
+  Only holes are filled (the number of filled cells is logged): gaps surrounded by data
+  or crossing the window from side to side (a river, a seam between tiles), at most 50
+  pixels from valid data. Everything else is left out of the model: the area beyond the
+  edge of the file, the sea of a source that leaves it empty, any larger gap. See
+  [Gaps and the edge of the data](#gaps-and-the-edge-of-the-data). Integer sources are
+  resampled in floating point.
 * **Nothing is silently downsampled**, and the log prints one `entrée ...` line per
   file: format, size, type, CRS, unit, and whether a band/variable/layer was chosen.
 
@@ -521,6 +526,29 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
   difference between two DEMs on the working grid (mean offset, RMS, 95th percentile)
   to check an automatic source against manually downloaded data.
 
+### Gaps and the edge of the data
+
+Cells of the area without data are treated in two ways:
+
+* **Holes** (voids, a missing strip between two tiles, a river left empty by the source):
+  filled by inverse-distance interpolation (`gdal.FillNodata`), as long as they are
+  surrounded by data or cross the window from side to side, and no cell is more than 50
+  working pixels from valid data. The number of filled cells is logged.
+* **Everything else** stays empty: the area beyond the edge of the file, the sea of a source
+  that leaves it as NoData, a large missing zone. A disc cut by
+  the edge of the file is therefore truncated instead of completed, which `--preview` shows;
+  with `--sea-level` these cells become sea. The log counts the cells of the area that the
+  former filling would have extended from the edge of the data.
+
+The former filling extended the relief up to 50 working pixels beyond the data. At the
+default `--print-spacing-mm 0.2` that is 10 mm on the printed part, whatever the radius, and
+it was invented relief: on a cliff coast, for instance, a plateau at the height of the cliff
+advanced into the sea. `--extrapolate-edges` brings it back (the log then says how many cells
+were extrapolated). With `--sides`, a shape that overshoots the data is refused, as before;
+`--extrapolate-edges` accepts it when the overshoot is within 50 pixels. The option has no
+effect on LAS/LAZ input, which never extends beyond the points (see `--lidar-interp`).
+The `--report` JSON counts these cells in `source.no_data`.
+
 ### Filling gaps with Copernicus (`--fill-with-copernicus`)
 
 National sources stop at their border (e.g. swissALTI3D at the Italian side of the
@@ -694,7 +722,7 @@ thickness, intended look) decides. The relief needs the data, so `--dry-run` can
 
 `--report` (optionally `--report file.json`; by default next to the model, same name in `.json`)
 writes a JSON file with the source and its attribution text, scale, relief, exaggeration, triangle
-counts, mesh options and the command line. It is written after the models; if it cannot be written,
+counts, mesh options, the cells without data (`source.no_data`) and the command line. It is written after the models; if it cannot be written,
 a warning is printed and the models are kept.
 
 ### Shaded preview (`--preview`)
@@ -740,6 +768,12 @@ consistency, and the expected behavior of each option.
  
 ## Notable changes
  
+- **No relief beyond the data. Behaviour change**: `gdal.FillNodata` used to extend the relief up to 50
+  working pixels beyond the data (10 mm on the printed part at the default `--print-spacing-mm`), outside
+  the file's footprint and around a large empty zone (a sea left as NoData). Only holes are filled now;
+  `--extrapolate-edges` brings the former behaviour back, and the log and the `--report` JSON count the
+  cells concerned (`tests/test_fill_edges.py`). A disc cut by the edge of the file is truncated, and a
+  `--sides` shape that overshoots the data is refused unless `--extrapolate-edges` is given.
 - **`--preview`**: shaded PNG preview of the cut area, written before meshing
   (`tests/test_preview.py`, `tests/test_preview_cli.py`).
 - **`check_stl.py`: shells, Euler characteristic and inverted triangles** (`--expect-shells`,

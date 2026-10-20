@@ -104,7 +104,7 @@ def build_report(*, outputs, model, relief, source, mesh_info, location, options
     """Assemble le dictionnaire du rapport. Aucun calcul : chaque section vient de l'appelant.
 
     outputs : {format: chemin} ; model : forme, diamètre, socle, exagération, échelle ; relief : relief_stats() ;
-    source : {used, input, fill_with_copernicus, attribution} ; mesh_info : nombres de triangles ; location :
+    source : {used, input, fill_with_copernicus, attribution, no_data} ; mesh_info : nombres de triangles ; location :
     lat/lon/cx/cy/radius_m connus ; options : options de maillage ; argv : ligne de commande."""
     created = created or datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     return _clean({

@@ -23,7 +23,8 @@ CX, CY = 1000.0, 2000.0
 @pytest.fixture
 def cone(monkeypatch):
     """Île conique (80 m, rayon 100 m) sur nodata, et court-circuit de la lecture GDAL."""
-    def warp(input_path, dst, cx, cy, radius, pixel, progress_cb=None, fill=True, inside_fn=None, resample="auto"):
+    def warp(input_path, dst, cx, cy, radius, pixel, progress_cb=None, fill=True, inside_fn=None, resample="auto",
+             extrapolate_edges=False, stats=None):
         n = int(round(2 * radius / pixel)) + 1
         xs = cx - radius + np.arange(n) * pixel
         ys = cy + radius - np.arange(n) * pixel

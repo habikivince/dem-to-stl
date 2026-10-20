@@ -356,12 +356,13 @@ def ask_float(question, default):
         return default
 
 
-def check_shape_coverage(shape, inside, kept, xs, ys, depth_m, scale):
+def check_shape_coverage(shape, inside, kept, xs, ys, depth_m, scale, extrapolated=False):
     """Refuse un masque de données qui ne couvre pas la forme. Le bord exact d'un polygone projette les nœuds de
     bord du masque sur le contour théorique : si une partie de la forme est sans donnée (DEM trop petit, nodata,
     valeurs sous --min-elevation), le bord du masque est loin du contour et la projection étirerait le maillage
     sur des dizaines de pas. Seules comptent les cellules à plus de `depth_m` (mètres) du bord de la forme ;
-    l'ouverture morphologique n'en retire jamais (elle ne mange qu'une cellule)."""
+    l'ouverture morphologique n'en retire jamais (elle ne mange qu'une cellule).
+    extrapolated : --extrapolate-edges est déjà actif (inutile de le suggérer dans le message)."""
     missing = inside & ~kept
     if not missing.any():
         return
@@ -375,7 +376,9 @@ def check_shape_coverage(shape, inside, kept, xs, ys, depth_m, scale):
              f"{depth[deep].max() * scale:.1f} mm imprimés de son bord, n'ont pas de donnée valide : le DEM ne couvre "
              f"pas toute la forme (rappel : un polygone circonscrit dépasse le cercle de référence), ou contient des "
              f"valeurs sans donnée ou inférieures à --min-elevation. Un bord exact ne peut pas suivre un masque "
-             f"incomplet. Fournis un DEM plus grand, ou utilise --sea-level (zone d'eau) ou --fill-with-copernicus.")
+             f"incomplet. Fournis un DEM plus grand, ou utilise --sea-level (zone d'eau) ou --fill-with-copernicus"
+             + ("." if extrapolated else " ; --extrapolate-edges prolonge le relief au-delà des données (jusqu'à "
+                f"{raster.FILL_MAX_DISTANCE_PX} pixels de travail) mais il n'existe pas dans le fichier."))
 
 
 def write_report_file(path, args, paths, info, used, attribution, clip, shape, preview_file=None):
@@ -398,13 +401,15 @@ def write_report_file(path, args, paths, info, used, attribution, clip, shape, p
                "vexag_curve": info.get("vexag_curve")},
         relief=info.get("relief"),
         source={"used": used, "input": [os.fspath(x) for x in inputs if x is not None],
-                "fill_with_copernicus": bool(args.fill_with_copernicus), "attribution": attribution or None},
+                "fill_with_copernicus": bool(args.fill_with_copernicus), "attribution": attribution or None,
+                "no_data": info.get("no_data")},
         mesh_info={k: info.get(k) for k in ("triangles_top", "triangles_bottom", "triangles_wall", "triangles_total")},
         location={"lat": args.lat, "lon": args.lon, "cx": args.cx, "cy": args.cy, "radius_m": info.get("radius_m"),
                   "place": args.place, "polygon": args.polygon},
         options={"top": args.top, "top_tol_mm": args.top_tol_mm, "bottom": args.bottom, "diagonal": args.diagonal,
                  "resample": args.resample, "smooth_wall": bool(args.smooth_wall), "sea_level": args.sea_level,
-                 "min_elevation": args.min_elevation, "land_threshold": args.land_threshold})
+                 "min_elevation": args.min_elevation, "land_threshold": args.land_threshold,
+                 "extrapolate_edges": bool(args.extrapolate_edges)})
     try:
         report.write_report(path, data)
         log(f"écrit : {os.path.abspath(path)}")
@@ -416,11 +421,13 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
                 smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
                 diagonal="fixed", top="grid", top_tol_mm=0.05, shape=None, corner_tol_mm=DEFAULT_CORNER_TOL_MM,
-                corner_segments=None, info=None, preview_path=None, vexag_curve=None):
+                corner_segments=None, info=None, preview_path=None, vexag_curve=None, extrapolate_edges=False):
     """info : dict optionnel, rempli avec ce que --report écrit (échelle, relief, nombres de triangles...).
     preview_path : si donné, aperçu ombré PNG de la pièce, écrit avant le maillage (voir preview.py).
     vexag_curve : AltitudeCurve (vexag_curve.py) ou None : correspondance altitude -> altitude équivalente appliquée
-    avant l'échelle et l'exagération."""
+    avant l'échelle et l'exagération.
+    extrapolate_edges : rétablit l'ancien comblement de gdal.FillNodata, qui prolonge le relief jusqu'à 50 pixels
+    de travail au-delà des données (voir raster.warp_window). Par défaut, seuls les trous sont comblés."""
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     clip_rings = None
@@ -447,8 +454,10 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         window_radius = shape.half_extent()
         outline = shape.scaled(scale).discretize(corner_tol_mm, corner_segments)
 
+    fill_stats = {}
     elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, window_radius, pixel_size_m,
-                                              inside_fn=inside_fn, resample=resample)
+                                              inside_fn=inside_fn, resample=resample,
+                                              extrapolate_edges=extrapolate_edges, stats=fill_stats)
     H, W = elev.shape
     log(f"grille ré-échantillonnée : {W} x {H} points")
 
@@ -459,10 +468,27 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
     n_zone = int(inside.sum())
     n_no_data = int((inside & ~valid).sum())
     n_low = int((inside & valid & ~plausible).sum())
+    edge_cells = fill_stats.get("edge_cells")       # cellules que gdal.FillNodata prolonge depuis le bord des données
+    n_edge = int((edge_cells & inside).sum()) if edge_cells is not None else 0
     if n_no_data:
         log(f"{n_no_data} cellule(s) sans donnée valide dans la zone ({100.0 * n_no_data / max(n_zone, 1):.1f} %) : "
             + ("remplacées par le niveau de la mer" if sea_level is not None else
-               "exclues du modèle (trous), le relief n'est jamais inventé"))
+               "exclues du modèle (trous) : le relief n'y est pas inventé"))
+    if n_edge:
+        pct = 100.0 * n_edge / max(n_zone, 1)
+        if extrapolate_edges:
+            log(f"ATTENTION : {n_edge} cellule(s) de la zone ({pct:.1f} %) EXTRAPOLÉE(S) au-delà des données "
+                f"(--extrapolate-edges, jusqu'à {raster.FILL_MAX_DISTANCE_PX} pixels de travail) : ce relief n'existe "
+                f"pas dans le fichier")
+        else:
+            log(f"{n_edge} cellule(s) de la zone ({pct:.1f} %) sont hors de l'emprise des données ou au bord d'une "
+                f"grande zone vide : laissées sans donnée plutôt que prolongées depuis le bord des données "
+                f"(--extrapolate-edges les prolonge sur {raster.FILL_MAX_DISTANCE_PX} pixels de travail au plus)")
+    if info is not None:
+        info["no_data"] = {"zone_cells": n_zone, "cells_without_data": n_no_data,
+                           "cells_extrapolated": n_edge if extrapolate_edges else 0,
+                           "cells_left_empty_at_edge": 0 if extrapolate_edges else n_edge,
+                           "extrapolate_edges": bool(extrapolate_edges)}
     if n_low:
         log(f"{n_low} cellule(s) valide(s) de la zone sous --min-elevation ({min_elevation:g} m) "
             + ("traitée(s) comme artefacts" if sea_level is not None else
@@ -506,7 +532,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         sys.exit("Erreur : zone trop petite par rapport à la résolution de ré-échantillonnage "
                   "(ou vide après nettoyage morphologique).")
     if shape is not None:
-        check_shape_coverage(shape, inside, clean_mask, xs - cx, ys - cy, 3.0 * pixel_size_m, scale)
+        check_shape_coverage(shape, inside, clean_mask, xs - cx, ys - cy, 3.0 * pixel_size_m, scale,
+                             extrapolated=extrapolate_edges)
     log(f"{int(quad_ok.sum())} cellules incluses dans "
         f"{'le contour' if clip is not None else 'la forme' if shape is not None else 'le disque'}")
 
@@ -624,6 +651,13 @@ def main():
                          "Copernicus GLO-30, recalé en altitude sur la source principale d'après leur zone "
                          "commune. Copernicus n'est téléchargé que s'il y a des trous. Requiert --lat/--lon "
                          "(ou --place) ; fonctionne avec --source ou --input.")
+    p.add_argument("--extrapolate-edges", action="store_true",
+                    help="Rétablit l'ancien comblement de gdal.FillNodata : le relief est prolongé sur 50 pixels "
+                         "de travail (10 mm imprimés à 0,2 mm de pas) au-delà des données, hors de l'emprise du "
+                         "fichier et autour d'une grande zone sans donnée (mer, frontière). Ce relief n'existe pas "
+                         "dans le fichier. Par défaut, seuls les trous (zones sans donnée entourées de données, de "
+                         "50 pixels au plus) sont comblés ; le reste reste sans donnée. Sans effet sur une entrée "
+                         "LAS/LAZ (voir --lidar-interp).")
     p.add_argument("--place", default=None,
                     help="Nom de lieu à la place de --lat/--lon (ex. \"Mont Fuji\", \"Mount Everest\"), "
                          "résolu via Nominatim/OpenStreetMap. Sans --input ni --source, la source est "
@@ -899,7 +933,7 @@ def main():
                           top=args.top, top_tol_mm=args.top_tol_mm, shape=shape,
                           corner_tol_mm=args.corner_tol_mm if shape is not None else DEFAULT_CORNER_TOL_MM,
                           corner_segments=args.corner_segments, info=info, preview_path=preview_file,
-                          vexag_curve=curve)
+                          vexag_curve=curve, extrapolate_edges=args.extrapolate_edges)
     except raster.InputError as e:
         fail(str(e))
     except RuntimeError as e:

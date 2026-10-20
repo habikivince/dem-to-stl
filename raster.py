@@ -11,6 +11,7 @@ import sys
 
 import numpy as np
 from osgeo import gdal, osr
+from scipy import ndimage
 
 gdal.UseExceptions()
 osr.UseExceptions()
@@ -209,6 +210,43 @@ def _complete_with_secondary(warped, loader, dst_srs_wkt, bounds, pixel_size_m, 
         f"ajoutées depuis la source secondaire, à plus faible résolution : raccord visible à la limite")
 
 
+FILL_MAX_DISTANCE_PX = 50   # rayon de recherche de gdal.FillNodata, et taille maximale d'un trou comblé
+
+
+def closed_gaps(missing, max_distance_px=FILL_MAX_DISTANCE_PX):
+    """Parmi les cellules sans donnée (`missing`, booléen), celles d'un TROU : composante connexe (8 voisins) dont
+    chaque cellule est à `max_distance_px` pixels au plus d'une cellule avec donnée, et qui, soit ne touche pas le
+    bord de la grille (elle est entourée de données), soit le touche en deux endroits distincts au moins (elle
+    traverse la grille de part en part : rivière, joint entre deux dalles). Interpoler un trou ne fait que
+    raccorder les données qui l'entourent.
+
+    Tout le reste n'est pas un trou : la zone au-delà de l'emprise de la source (elle touche le bord de la fenêtre
+    d'un seul côté), la mer d'une source qui la laisse sans donnée, toute zone vide trop grande. Les interpoler
+    reviendrait à EXTRAPOLER les altitudes du bord des données sur `max_distance_px` pixels, soit un relief inventé :
+    le README annonce que ce qui est plus grand que 50 pixels « is left out of the model ».
+    Retourne un masque booléen de même forme que `missing`."""
+    out = np.zeros(missing.shape, dtype=bool)
+    if not missing.any() or missing.all():
+        return out
+    labels, n = ndimage.label(missing, structure=np.ones((3, 3), dtype=bool))
+    dist = ndimage.distance_transform_edt(missing)
+    farthest = np.asarray(ndimage.maximum(dist, labels, index=np.arange(1, n + 1)))
+    ok = farthest <= max_distance_px
+    h, w = labels.shape
+    if min(h, w) < 2:
+        ring = labels.ravel()      # grille dégénérée : tout est bord
+    else:
+        # le pourtour dans l'ordre (haut, droite, bas, gauche) : deux cellules consécutives sont voisines, donc de la
+        # même composante si toutes deux sont sans donnée
+        ring = np.concatenate([labels[0, :], labels[1:, -1], labels[-1, -2::-1], labels[-2:0:-1, 0]])
+    starts = (ring > 0) & (ring != np.roll(ring, 1))                 # début de chaque tronçon sans donnée du pourtour
+    runs = np.bincount(ring[starts], minlength=n + 1)[1:]            # nombre de tronçons par composante
+    touches = np.zeros(n + 1, dtype=bool)
+    touches[np.unique(ring)] = True
+    ok &= ~touches[1:] | (runs >= 2)
+    return np.concatenate(([False], ok))[labels]
+
+
 RESAMPLE_CHOICES = ("auto", "average", "bilinear", "cubic", "cubicspline")
 # Au-delà de ce rapport (pixel de la source / pixel de travail), on considère que la source est
 # AGRANDIE : `average` de GDAL se comporte alors comme `nearest` (blocs constants, terrasses).
@@ -276,7 +314,7 @@ def _working_type(gdal_type):
 
 
 def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
-                inside_fn=None, resample="auto"):
+                inside_fn=None, resample="auto", extrapolate_edges=False, stats=None):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
@@ -294,7 +332,15 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     Valeurs sans donnée : le nodata déclaré par la source, sinon (non déclaré ou NaN) FILL_NODATA ; la zone
     hors de l'emprise de la source est toujours marquée sans donnée, jamais remplie de zéros. Une source
     entière est ré-échantillonnée en virgule flottante (pas d'arrondi des moyennes). Un nuage de points
-    (lidar.LidarInput) n'est pas ré-échantillonné : il est rastérisé directement sur cette grille."""
+    (lidar.LidarInput) n'est pas ré-échantillonné : il est rastérisé directement sur cette grille.
+
+    Comblement (fill=True) : seuls les TROUS (closed_gaps : entourés de données, à FILL_MAX_DISTANCE_PX pixels au
+    plus d'une donnée) sont interpolés. Les cellules sans donnée hors de l'emprise de la source ou dans une zone
+    vide plus grande restent sans donnée : le relief n'y est pas inventé. extrapolate_edges=True rétablit
+    l'ancien comportement (interpolation sur FILL_MAX_DISTANCE_PX pixels autour de toute donnée, donc
+    extrapolation au bord de la source). stats (dict, facultatif) reçoit "edge_cells" : masque des cellules
+    qu'une interpolation sur FILL_MAX_DISTANCE_PX pixels remplirait sans qu'elles soient dans un trou (remplies si
+    extrapolate_edges, laissées sans donnée sinon)."""
     if resample not in RESAMPLE_CHOICES:
         raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
     primary = _primary(input_path)
@@ -342,15 +388,25 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
                                  pixel_size_m, nodata, cx, cy, radius, inside_fn)
     if fill:  # fill=False : valeurs brutes, pour mesurer sans créer de données (compare_dems)
         before = band.ReadAsArray()
-        n_missing = int((~np.isfinite(before) | (before == nodata)).sum())
-        gdal.FillNodata(band, None, maxSearchDist=50, smoothingIterations=0,
+        missing = ~np.isfinite(before) | (before == nodata)
+        n_missing = int(missing.sum())
+        gdal.FillNodata(band, None, maxSearchDist=FILL_MAX_DISTANCE_PX, smoothingIterations=0,
                          callback=progress_cb or gdal.TermProgress_nocb)
         if n_missing:
             after = band.ReadAsArray()
-            n_filled = n_missing - int((~np.isfinite(after) | (after == nodata)).sum())
+            filled = missing & np.isfinite(after) & (after != nodata)
+            edge = filled & ~closed_gaps(missing)    # remplies par FillNodata sans être dans un trou
+            if stats is not None:
+                stats["edge_cells"] = edge
+            if edge.any() and not extrapolate_edges:
+                after[edge] = nodata                  # le relief hors des données n'est pas inventé
+                band.WriteArray(after)
+                filled &= ~edge
+            n_filled = int(filled.sum())
             if n_filled > 0:
                 log(f"{n_filled} cellule(s) sans donnée comblée(s) par interpolation pondérée par l'inverse de la "
-                    f"distance (gdal.FillNodata, rayon ≤ 50 pixels) ; {n_missing - n_filled} restent sans donnée")
+                    f"distance (gdal.FillNodata, rayon ≤ {FILL_MAX_DISTANCE_PX} pixels) ; "
+                    f"{n_missing - n_filled} restent sans donnée")
     elev = band.ReadAsArray().astype(np.float64)
     wgt = warped.GetGeoTransform()
     H, W = elev.shape
