@@ -38,10 +38,13 @@ import mesh
 import mesh_export
 import geocode
 import polygon
+import preview
 import raster
 import regular_polygon
+import report
 import sources
 import stl_io
+import vexag_curve
 
 log = raster.log
 
@@ -145,7 +148,8 @@ def default_stem(args):
         name += f"_{sides}cotes-{'inscrit' if args.circle_mode == 'inscribed' else 'circonscrit'}"
         if getattr(args, "corner_radius", None):
             name += f"_r{args.corner_radius:g}mm"
-    return name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
+    name = name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
+    return name + "_courbe" if getattr(args, "vexag_curve", None) else name
 
 
 def parse_formats(args):
@@ -373,11 +377,49 @@ def check_shape_coverage(shape, inside, kept, xs, ys, depth_m, scale):
              f"incomplet. Fournis un DEM plus grand, ou utilise --sea-level (zone d'eau) ou --fill-with-copernicus.")
 
 
+def write_report_file(path, args, paths, info, used, attribution, clip, shape, preview_file=None):
+    """Écrit le rapport JSON (--report). Un échec d'écriture est signalé sans faire échouer la génération : les
+    modèles sont déjà écrits."""
+    if shape is not None:
+        kind = "regular-polygon"
+    elif args.clip_to_place:
+        kind = "place-contour"
+    elif clip is not None:
+        kind = "polygon"
+    else:
+        kind = "circle"
+    inputs = args.input if isinstance(args.input, (list, tuple)) else [args.input]
+    data = report.build_report(
+        outputs={**paths, **({"preview": preview_file} if preview_file else {})},
+        model={"shape": kind, "diameter_mm": args.diameter_mm, "base_mm": args.base_mm, "vexag": args.vexag,
+               "scale_mm_per_m": info.get("scale_mm_per_m"), "pixel_size_m": info.get("pixel_size_m"),
+               "print_spacing_mm": args.print_spacing_mm, "grid": info.get("grid"), "cells": info.get("cells"),
+               "vexag_curve": info.get("vexag_curve")},
+        relief=info.get("relief"),
+        source={"used": used, "input": [os.fspath(x) for x in inputs if x is not None],
+                "fill_with_copernicus": bool(args.fill_with_copernicus), "attribution": attribution or None},
+        mesh_info={k: info.get(k) for k in ("triangles_top", "triangles_bottom", "triangles_wall", "triangles_total")},
+        location={"lat": args.lat, "lon": args.lon, "cx": args.cx, "cy": args.cy, "radius_m": info.get("radius_m"),
+                  "place": args.place, "polygon": args.polygon},
+        options={"top": args.top, "top_tol_mm": args.top_tol_mm, "bottom": args.bottom, "diagonal": args.diagonal,
+                 "resample": args.resample, "smooth_wall": bool(args.smooth_wall), "sea_level": args.sea_level,
+                 "min_elevation": args.min_elevation, "land_threshold": args.land_threshold})
+    try:
+        report.write_report(path, data)
+        log(f"écrit : {os.path.abspath(path)}")
+    except (OSError, ValueError, TypeError) as e:
+        log(f"ATTENTION : rapport non écrit ({e}) ; les modèles, eux, sont écrits.")
+
+
 def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
                 smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
                 diagonal="fixed", top="grid", top_tol_mm=0.05, shape=None, corner_tol_mm=DEFAULT_CORNER_TOL_MM,
-                corner_segments=None):
+                corner_segments=None, info=None, preview_path=None, vexag_curve=None):
+    """info : dict optionnel, rempli avec ce que --report écrit (échelle, relief, nombres de triangles...).
+    preview_path : si donné, aperçu ombré PNG de la pièce, écrit avant le maillage (voir preview.py).
+    vexag_curve : AltitudeCurve (vexag_curve.py) ou None : correspondance altitude -> altitude équivalente appliquée
+    avant l'échelle et l'exagération."""
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     clip_rings = None
@@ -469,12 +511,40 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 
     min_elev = sea_level if sea_level is not None else elev[clean_mask].min()
 
+    # hauteur du relief imprimé, affichée AVANT le maillage (étape longue) : on peut l'interrompre si elle surprend
+    top_alt = elev[report.touched_nodes(quad_ok)]
+    top_alt = top_alt[np.isfinite(top_alt)]
+    max_alt = float(top_alt.max()) if top_alt.size else min_elev
+    elev_mesh, min_mesh = elev, min_elev
+    equivalent_relief = None
+    if vexag_curve is not None:
+        elev_mesh, min_mesh = vexag_curve(elev), float(vexag_curve(min_elev))
+        equivalent_relief = float(vexag_curve(max_alt)) - min_mesh
+    relief = report.relief_stats(min_elev, max_alt, scale, vexag, diameter_mm, equivalent_relief)
+    for line in report.describe_relief(relief):
+        log(line)
+    if vexag_curve is not None:
+        for line in vexag_curve.describe(vexag):
+            log(line)
+    if preview_path:
+        try:
+            # aperçu du relief IMPRIMÉ : altitudes après la courbe éventuelle (elev_mesh), pas les altitudes brutes
+            w_px, h_px = preview.write_preview(preview_path, elev_mesh, quad_ok, pixel_size_m, vexag)
+            log(f"aperçu : {os.path.abspath(preview_path)} ({w_px} x {h_px} px, nord en haut, ombrage du relief imprimé)")
+        except (OSError, ValueError) as e:
+            log(f"ATTENTION : aperçu non écrit ({e})")
+
     tris, n_top, n_bot, n_wall = mesh.build_mesh_from_arrays(
-        elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
+        elev_mesh, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_mesh, progress=progress,
         smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None),
         bottom=bottom, bottom_max_cells=bottom_max_cells, diagonal=diagonal,
         top=top, top_tol_mm=top_tol_mm, outline=outline)
     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
+    if info is not None:
+        info.update(scale_mm_per_m=scale, pixel_size_m=pixel_size_m, radius_m=radius, grid=[W, H],
+                    cells=int(quad_ok.sum()), relief=relief, triangles_top=n_top, triangles_bottom=n_bot,
+                    triangles_wall=n_wall, triangles_total=len(tris),
+                    vexag_curve=None if vexag_curve is None else vexag_curve.as_list())
     return tris
 
 
@@ -526,6 +596,12 @@ def main():
     p.add_argument("--force", action="store_true",
                     help="Ignore le garde-fou de taille (estimation de RAM supérieure à 80 %% de la RAM disponible)")
     p.add_argument("--debug", action="store_true", help="Affiche la trace complète des erreurs")
+    p.add_argument("--report", nargs="?", const="auto", default=None, metavar="FICHIER",
+                    help="Écrit un rapport JSON (source et mention de licence, échelle, hauteur de relief, exagération, "
+                         "triangles, ligne de commande). Sans nom : à côté du modèle, même nom en .json")
+    p.add_argument("--preview", nargs="?", const="auto", default=None, metavar="FICHIER",
+                    help="Écrit un aperçu ombré PNG de la zone découpée, avant le maillage (relief imprimé, nord en "
+                         "haut). Sans nom : à côté du modèle, même nom en .png")
     p.add_argument("--dry-run", action="store_true",
                     help="Valide les paramètres, affiche l'estimation (grille, triangles, taille des fichiers, RAM) "
                          "et les fichiers prévus, puis s'arrête sans rien télécharger ni écrire")
@@ -570,6 +646,10 @@ def main():
                     help="Diamètre final imprimé, en mm (demandé interactivement si omis)")
     p.add_argument("--vexag", type=float, default=None,
                     help="Exagération verticale (demandée interactivement si omise)")
+    p.add_argument("--vexag-curve", default=None, metavar="ALT:EQ,...",
+                    help="Courbe d'exagération non linéaire : points « altitude:altitude_équivalente » en mètres "
+                         "(ex. 0:0,500:500,2000:1100,4000:1800), interpolés en PCHIP monotone, appliqués avant l'échelle "
+                         "et --vexag. Déforme le relief : la pièce n'est pas une réplique fidèle")
     p.add_argument("--base-mm", type=float, default=None,
                     help="Épaisseur du socle plat, en mm (demandé interactivement si omis)")
     p.add_argument("--print-spacing-mm", type=float, default=0.2,
@@ -739,12 +819,20 @@ def main():
         args.vexag = ask_float("Exagération verticale", 1.0)
 
     validate_print(args)
+    curve = None
+    if args.vexag_curve is not None:
+        try:
+            curve = vexag_curve.parse(args.vexag_curve)
+        except vexag_curve.CurveError as e:
+            fail(f"--vexag-curve : {e}")
     shape = build_shape(args, log=raster.log) if args.sides is not None else None
     # rayon du disque dont les données sont à récupérer : le cercle de référence, ou (forme) le disque qui contient
     # toute la pièce (rayon extrême du contour : un polygone circonscrit dépasse le cercle de référence). Les
     # sources ajoutent leurs propres marges ; la fenêtre de travail (demi-côté du carré englobant) est incluse.
     data_radius = args.radius if shape is None else shape.extreme_radius
     paths = resolve_outputs(args)
+    report_file = report.report_path(paths, args.report) if args.report else None
+    preview_file = preview.preview_path(paths, args.preview) if args.preview else None
     est_kw = {}
     if shape is not None:
         scale = (args.diameter_mm / 2.0) / args.radius
@@ -755,7 +843,7 @@ def main():
                     formats=tuple(paths), bottom=args.bottom, **est_kw)
     if args.dry_run:
         log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
-            + ", ".join(os.path.abspath(p) for p in paths.values()))
+            + ", ".join(os.path.abspath(p) for p in list(paths.values()) + [f for f in (preview_file, report_file) if f]))
         return
     input_kind = "raster"
     if args.input is not None:
@@ -766,7 +854,8 @@ def main():
             fail(str(e))
         if input_kind == "lidar" and args.fill_with_copernicus:
             fail("--fill-with-copernicus est incompatible avec une entrée LAS/LAZ.")
-    prepare_outputs(paths)
+    prepare_outputs({**paths, **({"png": preview_file} if preview_file else {}),
+                     **({"json": report_file} if report_file else {})})
 
     used = None
     if source:
@@ -797,6 +886,7 @@ def main():
         fail("--diagonal adaptive est sans objet avec --top adaptive")
     if args.top_tol_mm < 0:
         fail("--top-tol-mm doit être >= 0")
+    info = {}
     try:
         raster.check_readable(args.input)
         tris = build_mesh(args.input, args.lat, args.lon, args.cx, args.cy, args.radius,
@@ -807,7 +897,8 @@ def main():
                           bottom_max_cells=args.bottom_max_cells or None, diagonal=args.diagonal,
                           top=args.top, top_tol_mm=args.top_tol_mm, shape=shape,
                           corner_tol_mm=args.corner_tol_mm if shape is not None else DEFAULT_CORNER_TOL_MM,
-                          corner_segments=args.corner_segments)
+                          corner_segments=args.corner_segments, info=info, preview_path=preview_file,
+                          vexag_curve=curve)
     except raster.InputError as e:
         fail(str(e))
     except RuntimeError as e:
@@ -815,6 +906,7 @@ def main():
             raise
         fail(f"traitement GDAL impossible : {str(e).strip().splitlines()[0] if str(e).strip() else e} "
              f"(--debug pour la trace complète)")
+    preview_done = preview_file if preview_file and os.path.exists(preview_file) else None
     stem = os.path.splitext(os.path.basename(next(iter(paths.values()))))[0]
     srcs = [used] if used else []
     if args.fill_with_copernicus:
@@ -831,7 +923,9 @@ def main():
                        + f"), exagération verticale x{args.vexag:g}, socle {args.base_mm:g} mm"
                        + (f", source {used}" if used else ""))
     write_outputs(tris, paths, stem, description, attribution, progress=progress)
-    log("Terminé : " + ", ".join(os.path.abspath(p) for p in paths.values()))
+    if report_file:
+        write_report_file(report_file, args, paths, info, used, attribution, clip, shape, preview_done)
+    log("Terminé : " + ", ".join(os.path.abspath(p) for p in list(paths.values()) + [f for f in (preview_done, report_file) if f]))
 
 
 if __name__ == "__main__":

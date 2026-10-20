@@ -158,6 +158,22 @@ python circle_dem_to_stl.py \
     --sea-level 0
 ```
  
+### Non-linear exaggeration (`--vexag-curve`)
+
+```bash
+python circle_dem_to_stl.py --source auto --lat 27.9881 --lon 86.925 --radius 20000 \
+    --diameter-mm 200 --vexag-curve "0:0,4000:4000,8848:6000"
+```
+
+Instead of a single factor, a table *real altitude → equivalent altitude* (metres, decimal point),
+applied before the scale and `--vexag` (which still multiplies). In the example, relief is true to scale
+up to 4000 m, then the next 4848 m count for only 2000 m. Interpolation is monotone PCHIP: no dip or spike
+is invented between two points, the highest point stays the highest, and beyond the given points the slope of
+the first or last segment continues. Two equal equivalent altitudes clip the relief (a flat). The log warns
+that this is **not a faithful replica** (relative heights are altered) and prints the average exaggeration per
+segment; the file name gets a `_courbe` suffix. With a curve, `check_stl.py --relief-m` must be given the
+*equivalent* relief (`relief.relief_equivalent_m` in the `--report` JSON).
+
 ### All options
  
 | Option | Description | Default |
@@ -179,6 +195,7 @@ python circle_dem_to_stl.py \
 | `--diameter-mm` | Final printed diameter, in mm | prompted if omitted (250) |
 | `--base-mm` | Flat base thickness, in mm | prompted if omitted (3) |
 | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
+| `--vexag-curve` | Non-linear exaggeration: `alt:equivalent,...` points (m), PCHIP, applied before the scale and `--vexag`; not a faithful replica | disabled |
 | `--print-spacing-mm` | Target mesh resolution, in mm | 0.2 |
 | `--resample` | DEM resampling: `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
 | `--top` | Top-surface triangulation: `grid`, `adaptive` (prototype) | `grid` |
@@ -198,6 +215,8 @@ python circle_dem_to_stl.py \
 | `--download-copernicus` | Downloads the needed Copernicus DEM tiles instead of providing `--input` | disabled |
 | `--copernicus-product` | Copernicus resolution to download: `30` (GLO-30) or `90` (GLO-90) | 30 |
 | `--cache-dir` | Cache folder for downloaded Copernicus tiles | `./copernicus_cache` |
+| `--preview` | Shaded PNG preview of the cut area, written before meshing; optional file name | disabled |
+| `--report` | JSON report next to the model (source, attribution, scale, relief, triangles, command line); optional file name | disabled |
  
 Provide either `--cx`/`--cy` or `--lat`/`--lon` — not both.
  
@@ -210,7 +229,10 @@ lidar.py               # LAS/LAZ point clouds: chunked reading, class filtering,
 raster.py              # GDAL: opening, CRS detection/reprojection, resampling
 mesh.py                # pure numpy/scipy: mask cleanup, mesh construction
 regular_polygon.py     # pure numpy: regular polygons (--sides), exact membership, projection, arcs
+vexag_curve.py         # non-linear exaggeration (--vexag-curve): altitude -> equivalent altitude, monotone PCHIP
 stl_io.py              # binary STL writing
+preview.py             # shaded PNG preview (--preview): hillshade and PNG writer, no GDAL
+report.py              # printed relief height, indicative exaggeration, JSON report (--report); no GDAL
 download.py            # Copernicus DEM download (public S3 bucket)
 tests/
 ```
@@ -558,6 +580,19 @@ inside-out solid is consistent edge by edge and only this sign reveals it) and d
 triangles. Exit code 1 on failure; `--tol-mm`
 adjusts the dimension tolerance, `--no-watertight` skips the edge test on huge files.
 
+Two further checks run with the watertightness test (`--no-topology` skips them):
+
+* **Shells and Euler characteristic.** Shells are the parts connected through a shared edge;
+  for each one the tool reports V − E + F (2 for a closed surface without a handle, 0 for a
+  ring-shaped solid, and so on). Several islands or a hole in the data legitimately give several
+  shells or a handle, so without an expectation this is only described; two shells touching at
+  a single vertex are always refused. `--expect-shells N` turns it into a check (N shells, each
+  with V − E + F = 2).
+* **Inverted triangles.** A triangle moved across its neighbours (for instance by a contour
+  projection) keeps its edges consistent, so neither the edge test nor the signed volume sees
+  it; it is reported when its normal opposes those of all three neighbours (dot product < −0.5).
+  A sharp ridge or a cliff edge is not an inversion. Neither check detects self-intersections.
+
 ### Place outlines (`--place ... --clip-to-place`)
 
 `--clip-to-place` cuts along the OpenStreetMap outline of the place (island, commune,
@@ -628,6 +663,28 @@ installed, as an independent validator. Not checked here: opening in PrusaSlicer
 Measured on 4.9 M triangles: STL 245 MB, 3MF 61 MB, OBJ 192 MB, about 40 s for the three.
 Blender and some viewers import OBJ with Y up: rotate if needed (the file is Z up).
 
+### Relief height and JSON report (`--report`)
+
+Before meshing, the log states the printed relief: altitudes, vertical range, height above the
+base in mm with and without the vertical exaggeration, and share of the diameter. When the
+exaggeration is far from a rough reference (relief of about 22.5 % of the diameter, exaggeration
+between 1 and 8), an indicative `--vexag` is printed; it is never applied, the use (cutter, board
+thickness, intended look) decides. The relief needs the data, so `--dry-run` cannot print it.
+
+`--report` (optionally `--report file.json`; by default next to the model, same name in `.json`)
+writes a JSON file with the source and its attribution text, scale, relief, exaggeration, triangle
+counts, mesh options and the command line. It is written after the models; if it cannot be written,
+a warning is printed and the models are kept.
+
+### Shaded preview (`--preview`)
+
+`--preview` (optionally `--preview file.png`; by default next to the model, same name in `.png`)
+writes a hillshade PNG of the area that is actually cut, **before** meshing, so a wrong centre,
+holes in the data or a flat-looking relief show up without waiting for the mesh. North is up,
+light comes from the north-west, the shading is computed on the printed relief (altitudes times
+`--vexag`), and everything outside the piece is transparent. Images wider than 1600 px are averaged
+down. Like `--report`, it needs the data, so `--dry-run` only lists the file it would write.
+
 ### Previewing and smooth walls
 
 * `--dry-run` validates the parameters, prints the estimate (grid, triangles, size of each
@@ -662,6 +719,13 @@ consistency, and the expected behavior of each option.
  
 ## Notable changes
  
+- **`--preview`**: shaded PNG preview of the cut area, written before meshing
+  (`tests/test_preview.py`, `tests/test_preview_cli.py`).
+- **`check_stl.py`: shells, Euler characteristic and inverted triangles** (`--expect-shells`,
+  `--no-topology`), and **printed relief height in the log plus `--report`** (JSON next to the
+  model). Tests: `tests/test_topology_checks.py`, `tests/test_report.py`, `tests/test_report_cli.py`.
+- **`--vexag-curve`**: optional non-linear exaggeration (altitude → equivalent altitude, monotone PCHIP),
+  announced as not faithful (`tests/test_vexag_curve.py`, `tests/test_vexag_curve_cli.py`).
 - **Modular restructuring** (`raster.py`/`mesh.py`/`stl_io.py`):
   eliminates the duplication that used to exist between the old
   monolithic `circle_dem_to_stl.py` and `island_dem_to_stl.py`.

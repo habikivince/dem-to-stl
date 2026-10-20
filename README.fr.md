@@ -150,6 +150,23 @@ ignorées sans faire échouer le téléchargement.
 Sans `--diameter-mm`, `--base-mm` ni `--vexag`, le script les demande de
 façon interactive au lancement.
 
+### Exagération non linéaire (`--vexag-curve`)
+
+```bash
+python circle_dem_to_stl.py --source auto --lat 27.9881 --lon 86.925 --radius 20000 \
+    --diameter-mm 200 --vexag-curve "0:0,4000:4000,8848:6000"
+```
+
+Au lieu d'un facteur unique, une table *altitude réelle → altitude équivalente* (mètres, point décimal),
+appliquée avant l'échelle et `--vexag` (qui multiplie toujours). Dans l'exemple, le relief est à l'échelle
+vraie jusqu'à 4000 m, puis les 4848 m suivants ne comptent que pour 2000 m. L'interpolation est une PCHIP
+monotone : aucun creux ni pic n'est inventé entre deux points, le point le plus haut reste le plus haut, et au-delà
+des points donnés la pente du premier ou du dernier tronçon se prolonge. Deux altitudes équivalentes égales
+écrêtent le relief (un plat). Le journal avertit que la pièce n'est **pas une réplique fidèle** (les hauteurs
+relatives sont modifiées) et affiche l'exagération moyenne par tronçon ; le nom du fichier reçoit le suffixe
+`_courbe`. Avec une courbe, `check_stl.py --relief-m` doit recevoir le relief *équivalent*
+(`relief.relief_equivalent_m` dans le JSON de `--report`).
+
 ### Mode île (relief entouré d'eau sans donnée fiable)
 
 ```bash
@@ -182,6 +199,7 @@ python circle_dem_to_stl.py \
 | `--diameter-mm` | Diamètre final imprimé, en mm | demandé si omis (250) |
 | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
 | `--vexag` | Exagération verticale | demandée si omise (1.0) |
+| `--vexag-curve` | Exagération non linéaire : points `alt:équivalente,...` (m), PCHIP, appliquée avant l'échelle et `--vexag` ; pas une réplique fidèle | désactivé |
 | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
 | `--resample` | Ré-échantillonnage du DEM : `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
 | `--top` | Triangulation du dessus : `grid`, `adaptive` (prototype) | `grid` |
@@ -201,6 +219,8 @@ python circle_dem_to_stl.py \
 | `--download-copernicus` | Télécharge les tuiles Copernicus DEM nécessaires au lieu de fournir `--input` | désactivé |
 | `--copernicus-product` | Résolution Copernicus à télécharger : `30` (GLO-30) ou `90` (GLO-90) | 30 |
 | `--cache-dir` | Dossier de cache des tuiles Copernicus téléchargées | `./copernicus_cache` |
+| `--preview` | Aperçu ombré PNG de la zone découpée, écrit avant le maillage ; nom de fichier facultatif | désactivé |
+| `--report` | Rapport JSON à côté du modèle (source, mention de licence, échelle, relief, triangles, ligne de commande) ; nom de fichier facultatif | désactivé |
 
 Fournis soit `--cx`/`--cy`, soit `--lat`/`--lon` — pas les deux.
 
@@ -213,7 +233,10 @@ lidar.py               # nuages LAS/LAZ : lecture par blocs, filtrage des classe
 raster.py              # GDAL : ouverture, détection/reprojection CRS, ré-échantillonnage
 mesh.py                # numpy/scipy pur : nettoyage du masque, construction du maillage
 regular_polygon.py     # numpy pur : polygones réguliers (--sides), appartenance exacte, projection, arcs
+vexag_curve.py         # exagération non linéaire (--vexag-curve) : altitude -> altitude équivalente, PCHIP monotone
 stl_io.py              # écriture STL binaire
+preview.py             # aperçu ombré PNG (--preview) : ombrage et écriture du PNG, sans GDAL
+report.py              # hauteur de relief imprimé, exagération indicative, rapport JSON (--report) ; sans GDAL
 download.py            # téléchargement Copernicus DEM (compartiment S3 public)
 tests/
 ```
@@ -572,6 +595,20 @@ triangles dégénérés. Code de sortie 1 en cas d'échec ;
 `--tol-mm` règle la tolérance sur les dimensions, `--no-watertight` saute le test des
 arêtes sur de très gros fichiers.
 
+Deux contrôles de plus s'exécutent avec l'étanchéité (`--no-topology` les saute) :
+
+* **Coques et caractéristique d'Euler.** Les coques sont les parties reliées par une arête
+  commune ; pour chacune, l'outil donne V − E + F (2 pour une surface fermée sans anse, 0 pour un
+  solide en anneau, etc.). Plusieurs îles ou un trou dans les données donnent légitimement
+  plusieurs coques ou une anse : sans attente, c'est seulement décrit ; deux coques qui se
+  touchent par un seul sommet sont toujours refusées. `--expect-shells N` en fait un contrôle
+  (N coques, chacune à V − E + F = 2).
+* **Triangles retournés.** Un triangle déplacé de l'autre côté de ses voisins (par exemple par
+  une projection du contour) garde des arêtes cohérentes : ni le test d'arêtes ni le volume signé ne
+  le voient. Il est signalé quand sa normale s'oppose à celles de ses trois voisins (produit
+  scalaire < −0,5). Une crête vive ou un bord de falaise n'est pas un retournement. Aucun des deux
+  contrôles ne détecte les auto-intersections.
+
 ### Contours de lieux (`--place ... --clip-to-place`)
 
 `--clip-to-place` découpe selon le contour OpenStreetMap du lieu (île, commune, pays)
@@ -645,6 +682,29 @@ PrusaSlicer lui-même. Mesuré sur 4,9 M de triangles : STL 245 Mo, 3MF 61 Mo, O
 environ 40 s pour les trois. Blender et certains visionneurs importent l'OBJ avec Y vers le
 haut : fais pivoter si besoin (le fichier est Z vers le haut).
 
+### Hauteur de relief et rapport JSON (`--report`)
+
+Avant le maillage, le journal annonce le relief imprimé : altitudes, dénivelé, hauteur au-dessus du
+socle en mm avec et sans exagération verticale, part du diamètre. Quand l'exagération s'écarte nettement d'un
+repère approximatif (relief d'environ 22,5 % du diamètre, exagération entre 1 et 8), un `--vexag`
+indicatif est affiché ; il n'est jamais appliqué, l'usage (fraise, épaisseur de planche, rendu voulu)
+décide. Le relief demande les données : `--dry-run` ne peut pas l'afficher.
+
+`--report` (éventuellement `--report fichier.json` ; par défaut à côté du modèle, même nom en `.json`)
+écrit un JSON avec la source et sa mention de licence, l'échelle, le relief, l'exagération, les nombres de
+triangles, les options de maillage et la ligne de commande. Il est écrit après les modèles ; s'il ne peut pas
+l'être, un avertissement est affiché et les modèles sont conservés.
+
+### Aperçu ombré (`--preview`)
+
+`--preview` (éventuellement `--preview fichier.png` ; par défaut à côté du modèle, même nom en `.png`)
+écrit un PNG ombré (hillshade) de la zone réellement découpée, **avant** le maillage : un mauvais centre,
+des trous dans les données ou un relief qui paraît plat se voient sans attendre le calcul du maillage. Le
+nord est en haut, la lumière vient du nord-ouest, l'ombrage porte sur le relief imprimé (altitudes
+multipliées par `--vexag`) et tout ce qui est hors de la pièce est transparent. Une image de plus de 1600 px
+de large est moyennée. Comme `--report`, il demande les données : `--dry-run` se contente de lister le
+fichier qu'il écrirait.
+
 ### Aperçu et paroi lisse
 
 * `--dry-run` valide les paramètres, affiche l'estimation (grille, triangles, taille de chaque
@@ -678,6 +738,13 @@ cohérence des normales, et le comportement attendu de chaque option.
 
 ## Historique des changements notables
 
+- **`--preview`** : aperçu ombré PNG de la zone découpée, écrit avant le maillage
+  (`tests/test_preview.py`, `tests/test_preview_cli.py`).
+- **`check_stl.py` : coques, caractéristique d'Euler et triangles retournés** (`--expect-shells`,
+  `--no-topology`), et **hauteur de relief imprimé dans le journal avec `--report`** (JSON à côté du
+  modèle). Tests : `tests/test_topology_checks.py`, `tests/test_report.py`, `tests/test_report_cli.py`.
+- **`--vexag-curve`** : exagération non linéaire facultative (altitude → altitude équivalente, PCHIP monotone),
+  annoncée comme non fidèle (`tests/test_vexag_curve.py`, `tests/test_vexag_curve_cli.py`).
 - **Restructuration modulaire** (`raster.py`/`mesh.py`/`stl_io.py`) : élimine la duplication qui existait entre l'ancien `circle_dem_to_stl.py` monolithique et `island_dem_to_stl.py`.
 - **Reprojection CRS automatique** : plus besoin de `gdalwarp` manuel avant chaque nouveau site quand la source est en coordonnées géographiques.
 - **`--lat`/`--lon`** en alternative à `--cx`/`--cy`.
