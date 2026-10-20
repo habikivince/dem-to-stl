@@ -423,9 +423,10 @@ instead (interpolated values, not the raw JPGIS mesh).
 `austria` (BEV): licence (CC BY 4.0), 1 m resolution and the ATOM download
 service come from the provider's official record; the feed address, the title
 format of its entries and the idea that the COGs declare an unusable CRS come
-from the open-source `geostl` project; as a precaution, the tool therefore wraps
-each tile in a small local VRT that forces EPSG:3035 (without having checked that
-this is necessary). **It has been run against the real BEV server at two places
+from the open-source `geostl` project. However, the tile examined (E = 4,500,000 m)
+declares a correct CRS ("ETRS89-extended / LAEA Europe", read with `gdalinfo`), so
+the small local VRT that wraps each tile and forces EPSG:3035 is probably not
+necessary; it is kept as a precaution. **It has been run against the real BEV server at two places
 only** (October 2026, series of 15.09.2025, both in high mountains): the
 Grossglockner (one tile) and an area straddling the boundary between two tiles
 (E = 4,550,000 m, vertical seam); in both cases the STL is watertight
