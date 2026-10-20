@@ -28,6 +28,8 @@ def check_readable(input_path):
     """Ouvre le raster principal pour échouer tôt avec un message clair (au lieu d'un
     traceback GDAL au milieu du traitement)."""
     path = _primary(input_path)
+    if getattr(path, "is_lidar", False):
+        return   # nuage de points : déjà ouvert et validé par formats.prepare
     try:
         ds = gdal.Open(path)
     except RuntimeError as e:
@@ -42,6 +44,20 @@ def _primary(input_path):
     nationales, éventuellement dans des CRS différents) : on utilise le
     premier pour lire CRS et nodata, gdal.Warp se charge du reste."""
     return input_path[0] if isinstance(input_path, (list, tuple)) else input_path
+
+
+def _source_srs(input_path):
+    """CRS de la source principale (raster, ou nuage LAS/LAZ qui expose `srs_wkt`). Une source sans CRS est
+    refusée : sans lui, rien ne dit si les coordonnées sont des degrés ou des mètres."""
+    primary = _primary(input_path)
+    wkt = primary.srs_wkt if getattr(primary, "is_lidar", False) else gdal.Open(primary).GetProjection()
+    if not wkt:
+        raise InputError("la source n'a pas de système de coordonnées (CRS) : degrés ou mètres, impossible de le "
+                         "savoir. Indique-le avec --source-crs (ex. EPSG:2056) ou géoréférence le fichier.")
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(wkt)
+    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return srs
 
 
 def _is_web_mercator(srs):
@@ -69,10 +85,7 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
 
     Retourne (dst_srs_wkt, cx, cy) où cx/cy sont dans dst_srs_wkt.
     """
-    ds = gdal.Open(_primary(input_path))
-    src_srs = osr.SpatialReference()
-    src_srs.ImportFromWkt(ds.GetProjection())
-    src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    src_srs = _source_srs(input_path)
 
     have_latlon = lat is not None and lon is not None
     have_xy = cx is not None and cy is not None
@@ -80,16 +93,19 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
         sys.exit("Erreur interne : ni --cx/--cy ni --lat/--lon résolus avant resolve_target_crs_and_center.")
 
     web_mercator = (not src_srs.IsGeographic()) and _is_web_mercator(src_srs)
-    if src_srs.IsGeographic() or web_mercator:
+    # CRS projeté dont l'unité n'est pas le mètre (pieds, pieds US...) : le pipeline raisonne en mètres, on passe
+    # donc aussi par une zone UTM plutôt que de lire des pieds comme des mètres
+    non_metric = (src_srs.IsProjected() and not web_mercator and abs(src_srs.GetLinearUnits() - 1.0) > 1e-9)
+    if src_srs.IsGeographic() or web_mercator or non_metric:
         # Point de référence pour déterminer la zone UTM : --lat/--lon en
         # priorité, sinon --cx/--cy réinterprétés comme lon/lat (ils sont
         # nécessairement dans ce système si la source l'est ; en Web Mercator
         # ils sont d'abord reconvertis en lon/lat).
         if have_latlon:
             ref_lon, ref_lat = lon, lat
-        elif web_mercator:
-            wm_to_geo = osr.CoordinateTransformation(src_srs, _wgs84())
-            ref_lon, ref_lat, _ = wm_to_geo.TransformPoint(cx, cy)
+        elif web_mercator or non_metric:
+            to_geo = osr.CoordinateTransformation(src_srs, _wgs84())
+            ref_lon, ref_lat, _ = to_geo.TransformPoint(cx, cy)
         else:
             ref_lon, ref_lat = cx, cy
 
@@ -98,7 +114,9 @@ def resolve_target_crs_and_center(input_path, lat, lon, cx, cy):
         dst_srs = osr.SpatialReference()
         dst_srs.ImportFromEPSG(dst_epsg)
         dst_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        kind = "Web Mercator (EPSG:3857, mètres non métriques)" if web_mercator else "géographique"
+        kind = ("Web Mercator (EPSG:3857, mètres non métriques)" if web_mercator
+                else f"projeté en {src_srs.GetLinearUnitsName()} (1 unité = {src_srs.GetLinearUnits():.7g} m)"
+                if non_metric else "géographique")
         log(f"CRS source {kind} détecté -> reprojection à la volée vers "
             f"UTM {utm_zone}{'N' if ref_lat >= 0 else 'S'} (EPSG:{dst_epsg})")
 
@@ -206,6 +224,8 @@ def source_pixel_size_m(input_path, dst_srs_wkt, cx, cy, max_files=8, reduce="mi
     if reduce not in ("min", "max"):
         raise ValueError("reduce doit valoir 'min' ou 'max'")
     paths = list(input_path) if isinstance(input_path, (list, tuple)) else [input_path]
+    if any(getattr(p, "is_lidar", False) for p in paths):
+        return None   # nuage de points : pas de pixel natif (voir lidar.py)
     if len(paths) > max_files:
         step = len(paths) / max_files
         paths = [paths[int(i * step)] for i in range(max_files)]
@@ -247,6 +267,14 @@ def choose_resample_alg(mode, src_pixel_m, pixel_size_m):
     return "average"
 
 
+def _working_type(gdal_type):
+    """Type de la grille de travail : Float32, ou Float64 pour les sources à 32 bits entiers ou plus. Une source
+    entière ne doit jamais être ré-échantillonnée en entiers (la moyenne serait arrondie au mètre)."""
+    wide = (gdal.GDT_Int32, gdal.GDT_UInt32, gdal.GDT_Float64, getattr(gdal, "GDT_Int64", -1),
+            getattr(gdal, "GDT_UInt64", -1))
+    return gdal.GDT_Float64 if gdal_type in wide else gdal.GDT_Float32
+
+
 def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
                 inside_fn=None, resample="auto"):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
@@ -261,14 +289,25 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     inside_fn(xs, ys) -> masque : zone à compléter si elle n'est pas le disque (mode polygone).
     resample : "auto" (défaut), "average", "bilinear", "cubic" ou "cubicspline". En "auto", un DEM plus
     grossier que la grille de travail est interpolé (bilinear) au lieu d'être répliqué par blocs ; avec
-    plusieurs sources de résolutions différentes, la plus grossière décide."""
+    plusieurs sources de résolutions différentes, la plus grossière décide.
+
+    Valeurs sans donnée : le nodata déclaré par la source, sinon (non déclaré ou NaN) FILL_NODATA ; la zone
+    hors de l'emprise de la source est toujours marquée sans donnée, jamais remplie de zéros. Une source
+    entière est ré-échantillonnée en virgule flottante (pas d'arrondi des moyennes). Un nuage de points
+    (lidar.LidarInput) n'est pas ré-échantillonné : il est rastérisé directement sur cette grille."""
     if resample not in RESAMPLE_CHOICES:
         raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
-    ds = gdal.Open(_primary(input_path))
-    nodata = ds.GetRasterBand(1).GetNoDataValue()
+    primary = _primary(input_path)
+    if getattr(primary, "is_lidar", False):
+        return primary.grid_window(dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=progress_cb,
+                                   inside_fn=inside_fn, fill=fill, resample=resample)
+    ds = gdal.Open(primary)
+    src_band = ds.GetRasterBand(1)
+    declared = src_band.GetNoDataValue()
     loader = getattr(input_path, "fill_loader", None) if fill else None
-    if loader is not None and nodata is None:
-        nodata = FILL_NODATA
+    nodata = float(declared) if declared is not None and math.isfinite(declared) else FILL_NODATA
+    # NaN dans une grille flottante sans nodata déclaré : traité comme « sans donnée », jamais comme altitude
+    src_nodata = "nan" if declared is None and src_band.DataType in (gdal.GDT_Float32, gdal.GDT_Float64) else None
 
     xmin, xmax = cx - radius, cx + radius
     ymin, ymax = cy - radius, cy + radius
@@ -281,6 +320,10 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
         why = (f"pixel de la source ≈ {src_px:.1f} m > pixel de travail {pixel_size_m:.2f} m : "
                "la source est agrandie" if resample == "auto" else "demandé par --resample")
         log(f"ré-échantillonnage {alg} ({why})")
+    elif src_px is not None:
+        log(f"résolution : pixel natif de la source ≈ {src_px:.3g} m, grille de travail {pixel_size_m:.3g} m "
+            f"({'moyenne des pixels sources' if src_px < pixel_size_m / UPSAMPLE_RATIO else 'résolutions voisines'}"
+            f", ré-échantillonnage average)")
 
     warped = gdal.Warp(
         "", input_path, format="MEM",
@@ -288,6 +331,8 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
         outputBounds=(xmin, ymin, xmax, ymax),
         xRes=pixel_size_m, yRes=pixel_size_m,
         resampleAlg=alg,
+        outputType=_working_type(src_band.DataType),
+        srcNodata=src_nodata,
         dstNodata=nodata,
         callback=progress_cb or gdal.TermProgress_nocb,
     )
@@ -296,8 +341,16 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
         _complete_with_secondary(warped, loader, dst_srs_wkt, (xmin, ymin, xmax, ymax),
                                  pixel_size_m, nodata, cx, cy, radius, inside_fn)
     if fill:  # fill=False : valeurs brutes, pour mesurer sans créer de données (compare_dems)
+        before = band.ReadAsArray()
+        n_missing = int((~np.isfinite(before) | (before == nodata)).sum())
         gdal.FillNodata(band, None, maxSearchDist=50, smoothingIterations=0,
                          callback=progress_cb or gdal.TermProgress_nocb)
+        if n_missing:
+            after = band.ReadAsArray()
+            n_filled = n_missing - int((~np.isfinite(after) | (after == nodata)).sum())
+            if n_filled > 0:
+                log(f"{n_filled} cellule(s) sans donnée comblée(s) par interpolation pondérée par l'inverse de la "
+                    f"distance (gdal.FillNodata, rayon ≤ 50 pixels) ; {n_missing - n_filled} restent sans donnée")
     elev = band.ReadAsArray().astype(np.float64)
     wgt = warped.GetGeoTransform()
     H, W = elev.shape

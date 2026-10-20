@@ -85,6 +85,22 @@ GDAL requires the matching system libraries (`libgdal-dev` on
 Debian/Ubuntu, `gdal` on Arch) — if `pip install gdal` fails, install
 GDAL through your system's package manager rather than pip alone.
  
+**Optional dependencies** (`requirements-optional.txt`): `laspy` for LAS point
+clouds and `lazrs` for compressed `.laz` files; `netCDF4` and `h5py` are used
+by the tests only. Without them everything else works, and the program says
+what is missing when you give it a `.las`/`.laz` file. On Arch (where `pip`
+refuses to touch the system environment), use a virtual environment that
+still sees the system GDAL:
+
+```fish
+python -m venv --system-site-packages .venv
+source .venv/bin/activate.fish
+pip install -r requirements.txt -r requirements-optional.txt
+```
+
+(Arch package names for laspy/lazrs were not checked here; `pip` in a venv is
+the route that was tested.)
+
 A complete, step-by-step tutorial — from an immediate hands-on demo
 with no download required, to processing a real site — is available
 in [TUTORIAL.md](TUTORIAL.md).
@@ -146,7 +162,16 @@ python circle_dem_to_stl.py \
  
 | Option | Description | Default |
 |---|---|---|
-| `--input` | Source GeoTIFF or VRT, geographic or projected CRS | omitted if `--download-copernicus` is used |
+| `--input` | One or more source files: GeoTIFF/VRT, ESRI ASCII Grid (`.asc`), SRTM (`.hgt`), GeoPackage raster (`.gpkg`), NetCDF (`.nc`), HDF5 (`.h5`/`.hdf5`, NetCDF-4/CF only), LAS/LAZ point cloud — see [Input formats](#input-formats) | omitted if `--download-copernicus` is used |
+| `--layer` | GeoPackage raster table, NetCDF variable or HDF5 dataset to read (required when the file holds several candidates) | none |
+| `--band` | Band to read: multiband file, or NetCDF/HDF5 slice (time, level...) — never chosen for you | none |
+| `--source-crs` | CRS of a file that declares none (e.g. `EPSG:2056`); refused if the file already declares one | none |
+| `--vertical-unit` | `m`, `ft` or `us-ft`: unit of the altitudes, replaces the declared (or missing) one | declared unit, else metres + warning |
+| `--lidar-select` | LAS/LAZ: `ground` (class 2 mean per cell), `lowest` or `highest` per cell | `ground` |
+| `--lidar-cell` | LAS/LAZ: cell size of the gridded point cloud, in m | working pixel |
+| `--lidar-interp` | LAS/LAZ: hole filling `linear`, `nearest` or `none` | `linear` |
+| `--lidar-max-gap` | LAS/LAZ: maximum fill distance, in m | 50 cells |
+| `--lidar-spike-m` | LAS/LAZ: tolerance for isolated spike/pit cells, in m (`0` = off) | 10 |
 | `--output` | Output STL file | required |
 | `--cx`, `--cy` | Circle center, in the source file's CRS | see `--lat`/`--lon` |
 | `--lat`, `--lon` | Circle center in WGS84 — alternative to `--cx`/`--cy` | see `--cx`/`--cy` |
@@ -180,6 +205,8 @@ Provide either `--cx`/`--cy` or `--lat`/`--lon` — not both.
  
 ```
 circle_dem_to_stl.py   # argparse, interactive prompts, orchestration
+formats.py             # input formats: detection, per-format reading rules, normalisation (CRS, units, NoData)
+lidar.py               # LAS/LAZ point clouds: chunked reading, class filtering, rasterisation, hole filling
 raster.py              # GDAL: opening, CRS detection/reprojection, resampling
 mesh.py                # pure numpy/scipy: mask cleanup, mesh construction
 regular_polygon.py     # pure numpy: regular polygons (--sides), exact membership, projection, arcs
@@ -188,10 +215,147 @@ download.py            # Copernicus DEM download (public S3 bucket)
 tests/
 ```
  
+Every source goes through the same chain: **detection → reader → normalisation
+(altitudes in metres, CRS known, NoData marked) → geospatial processing
+(reprojection, clipping, resampling) → common meshing engine → export**. The
+meshing engine (`mesh.py`) knows nothing about file formats. A point cloud is
+not forced through a raster reader: `lidar.py` rasterises it directly onto the
+working grid.
+
 `mesh.py` never depends on GDAL or the filesystem — testable with
 plain numpy arrays, which lets watertightness and normal consistency
 be verified without ever opening a file.
  
+## Input formats
+
+`--input` takes one or more files; the format is recognised from the extension
+and, for point clouds, from the file signature. Whatever the format, the program
+never guesses silently: when a choice is ambiguous (several bands, tables or
+variables, a missing CRS, an unclassified point cloud) it **stops and says what to
+add**. The three levels below are what was actually tested.
+
+| Format | Extensions | Level | What you must know |
+|---|---|---|---|
+| GeoTIFF, VRT | `.tif` `.tiff` `.vrt` | **fully supported** | Any compression GDAL has (DEFLATE, LZW, PackBits, tiles, BigTIFF; ZSTD and LERC were tested because this GDAL has them). Int16/UInt16/Int32/Float32/Float64. One band, or `--band N`. |
+| ESRI ASCII Grid | `.asc` | **fully supported** | Header validated (malformed or truncated files are refused, never read blindly). CRS from the `.prj` next to it, otherwise `--source-crs`. |
+| SRTM | `.hgt` | **fully supported** | Name must look like `N46E007.hgt` (it carries the position). SRTM1 (3601²) and SRTM3 (1201²). Voids are NoData. Give neighbouring tiles together to assemble them. |
+| GeoPackage (raster) | `.gpkg` | **needs a selection** | Only **raster elevation tables** (one band Int16/UInt16/Float32). With 2+ tables, `--layer TABLE` is required. Vector-only packages and image tiles (RGB, palette) are refused: *not every GeoPackage is a DEM*. |
+| NetCDF | `.nc` | **needs a selection** | Regular spatial axes (lat/lon or x/y) required. Several variables → `--layer NAME` unless exactly one declares itself an elevation. Extra dimensions (time, level) → `--band N`. |
+| HDF5 | `.h5` `.hdf5` | **partial** | Only HDF5 that follows the NetCDF-4/CF model with spatial axes (read like NetCDF). A generic HDF5 (bare datasets) is **reported as unsupported**, with the datasets it contains. |
+| LAS, LAZ | `.las` `.laz` | **supported, own pipeline** | Needs `laspy` (+`lazrs` for `.laz`). Ground class 2 by default; an unclassified cloud needs an explicit `--lidar-select`. See [Point clouds](#point-clouds-lasllaz). |
+| Any other raster GDAL opens | | read through GDAL (not specifically tested) | Same rules for bands, CRS, units and NoData. |
+| **Not supported** | `.zip`/`.hgt.zip` archives, E57/PLY/XYZ clouds, curvilinear or irregular NetCDF grids, generic HDF5 | refused with a message | Unzip / convert first (`gdal_translate`, PDAL). |
+
+### Rules shared by all formats
+
+* **Altitudes are converted to metres** from the declared unit (`feet`, `US survey
+  foot`, `cm`, `km`...). The unit of a band, a NetCDF variable, or the vertical
+  part of a compound CRS is used; `--vertical-unit m|ft|us-ft` overrides it. If
+  none is declared, **metres are assumed and a warning says so**; a non-length unit
+  (e.g. `K`) is refused. A declared `scale`/`offset` (packed integers) is applied;
+  NetCDF `positive = down` (depths) flips the sign.
+* **Coordinates are never assumed.** A file without CRS is refused until you give
+  `--source-crs EPSG:xxxx` (which is itself refused if the file already declares
+  one). Degrees vs metres is checked against the extent (a "geographic" CRS with
+  coordinates like 2 600 000 is refused; a metric CRS with degree-sized
+  coordinates triggers a warning). NetCDF with `degrees_north/east` axes but no datum
+  is read as WGS84 **with an explicit warning**. A source in feet is reprojected to
+  UTM metres; `--radius` is always in metres.
+* **No silent vertical datum change.** A compound CRS (e.g. EPSG:2056+5728) has its
+  vertical part ignored for positioning and the log says no geoid/ellipsoid
+  conversion was applied.
+* **NoData is never zero.** A declared NoData, NaN/inf, SRTM voids and the area outside
+  the file's footprint all stay NoData. Gaps up to 50 pixels are filled (the number of
+  filled cells is logged); anything larger is left out of the model. Integer
+  sources are resampled in floating point.
+* **Nothing is silently downsampled**, and the log prints one `entrée ...` line per
+  file: format, size, type, CRS, unit, and whether a band/variable/layer was chosen.
+
+### Examples
+
+```bash
+# Multiband GeoTIFF: choose the band
+python circle_dem_to_stl.py --input dem.tif --band 2 --cx 2601000 --cy 1201000 --radius 300 --diameter-mm 60 --vexag 1 --output out.stl
+# Altitudes in feet that the file does not declare
+python circle_dem_to_stl.py --input dem.tif --vertical-unit ft ...
+# ASC without .prj
+python circle_dem_to_stl.py --input terrain.asc --source-crs EPSG:2056 ...
+# SRTM: two neighbouring tiles assembled, centre on the seam
+python circle_dem_to_stl.py --input N46E007.hgt N46E008.hgt --lat 46.5 --lon 8.0 --radius 3000 ...
+# GeoPackage with several raster tables
+python circle_dem_to_stl.py --input data.gpkg --layer mnt_2m ...
+# NetCDF: variable and time step
+python circle_dem_to_stl.py --input grid.nc --layer elevation --band 3 --lat 46.1 --lon 7.15 --radius 3000 ...
+```
+
+### Point clouds (LAS/LAZ)
+
+A point cloud has no grid, no NoData and no native resolution, so it is **not**
+pushed through a raster reader: `lidar.py` reads it in chunks of 2 million points
+(constant memory) and rasterises it **directly on the working grid** (same origin,
+step and CRS), so there is no extra resampling unless you ask for `--lidar-cell`.
+
+1. Points outside the requested window are dropped first; the file CRS (WKT record,
+   extended record, or GeoTIFF keys) is reprojected chunk by chunk when it differs
+   from the working CRS.
+2. *Withheld* points and ASPRS noise classes 7 and 18 are always excluded. With
+   `--lidar-select ground` (default) only class 2 is kept and each cell takes the
+   **mean** of its ground points; `lowest`/`highest` take the min/max of all kept
+   points. An **unclassified** cloud with `ground` is refused, with the classes
+   present and the alternatives; `lowest` is only an approximation of the ground
+   (too high under dense canopy or buildings) and the log says so.
+3. Exact duplicate points (same x, y, z) are removed within each chunk.
+4. Isolated aberrant cells (a spike or pit exceeding all ≥5 valid neighbours by more
+   than `--lidar-spike-m` plus their own spread) are dropped; slopes and cliffs are not.
+5. Empty cells are filled by `--lidar-interp`: `linear` (Delaunay triangulation of the
+   valid cells around the holes; never extrapolates outside the cloud), `nearest`, or
+   `none`; only up to `--lidar-max-gap` (default 50 cells). The log reports how many
+   cells were filled and how many remain NoData, and warns when fewer than half of
+   the cells contain a point (the filled detail would be invented).
+6. `--lidar-cell M` (default: the working pixel) sets the cell of the gridded cloud;
+   if it differs from the working pixel the grid is resampled **once** (bilinear if
+   coarser, average if finer) and the log says so.
+
+Altitude units come from the CRS vertical unit (or `--vertical-unit`); without
+one the horizontal unit is assumed, **with a warning**. A CRS-less cloud needs
+`--source-crs`. Several files must share one CRS. Tested on LAS 1.2/1.3/1.4
+(point formats 0, 1, 3, 4, 6, 8) and LAZ.
+
+### Common errors and fixes
+
+| Message (start) | Cause | Fix |
+|---|---|---|
+| `... contient N bandes ... --band N` | multiband file or NetCDF/HDF5 time dimension | pick the band (the list shows each band's time/unit) |
+| `... aucun système de coordonnées ... --source-crs` | no CRS in the file | `--source-crs EPSG:xxxx` |
+| `... déclare déjà un CRS` | `--source-crs` given for a georeferenced file | drop `--source-crs` |
+| `... impossible en degrés` | geographic CRS declared for metre coordinates | fix the file's CRS or give the right `--source-crs` |
+| `... n'est pas une unité de longueur` | variable in K, %, ... | not an elevation; or force `--vertical-unit` if it really is |
+| `fichier ASC tronqué` / `en-tête ASC mal formé` | cut-off or malformed `.asc` | re-download/regenerate the file |
+| `tuile SRTM ... le nom doit être ...` | `.hgt` renamed or in an archive | restore `N46E007.hgt`-style names, unzip |
+| `... N tables raster, choisis-en une avec --layer` | several raster tables | `--layer TABLE` |
+| `... ne se déclare pas comme une altitude ... --layer` | NetCDF variable(s) not identified as elevation | `--layer NAME` if you know it is |
+| `HDF5 non géoréférencé` | generic HDF5 without axes | convert to GeoTIFF/NetCDF with `gdal_translate` first |
+| `aucun point classé « sol »` | unclassified cloud | classify it (PDAL `filters.smrf`, LAStools `lasground`) or `--lidar-select lowest`/`highest` |
+| `la lecture des fichiers LAS/LAZ requiert laspy` / `compressé (LAZ) ... aucun décompresseur` | missing optional dependency | `pip install laspy lazrs` (in a venv) |
+| `aucun point du nuage dans la zone demandée` | centre/radius outside the cloud | check `--cx/--cy` and the CRS of the cloud |
+
+### Known limits
+
+* HDF5: only the NetCDF-4/CF layout; no generic HDF5, no HDF-EOS.
+* NetCDF: one variable and one slice per run; no curvilinear or irregular grids.
+* GeoPackage: raster elevation tables only. GDAL applies the table's own scale/offset
+  and declared precision: in our test, a table declaring a precision of 1 returned values
+  rounded to the metre (that is GDAL reading the file as declared).
+* SRTM: `.hgt` files only (no `.zip`); SRTM1 and SRTM3 tiles are not mixed in one assembly (warning).
+* The vertical datum (geoid vs ellipsoid) is never converted; an undeclared unit is assumed to be metres.
+* LAS/LAZ: the whole file is streamed once (time grows with the number of points,
+  not with the size of the window); exact duplicates are removed only within a
+  2-million-point chunk; `lowest` approximates the ground; `linear` filling can
+  bridge a concavity inside the convex hull of the surrounding cells.
+* Pre-existing behaviour that is now logged: `--min-elevation` (default −50 m)
+  silently dropped lower terrain before; the number of excluded cells is now printed.
+
+
 ## Compatible data sources
  
 Successfully tested on, among others: GSI DEM1A (Japan, XML/JPGIS —
@@ -479,6 +643,17 @@ Blender and some viewers import OBJ with Y up: rotate if needed (the file is Z u
 ```bash
 pytest tests/
 ```
+
+The input-format tests build tiny synthetic files (a tilted plane, so the
+expected altitude of every cell is known exactly) and check values, size,
+orientation, NoData, corruption and units for each format, then run the whole
+command line and measure the STL that comes out (watertight, outward faces,
+relief matching the known slope, summit on the expected side):
+`tests/test_input_formats.py` (GeoTIFF, ASC, SRTM), `tests/test_input_containers.py`
+(GeoPackage, NetCDF, HDF5), `tests/test_lidar.py` (LAS/LAZ), and
+`tests/test_input_formats_cli.py`. LAS/LAZ tests are skipped if `laspy` is
+missing, and the NetCDF/HDF5 ones if `netCDF4`/`h5py` are (the reason is
+printed). Run one module with e.g. `pytest tests/test_lidar.py -q`.
  
 The tests reproduce the synthetic scenarios used during development
 (conical island, isolated artifact, water-surface noise touching the
@@ -494,6 +669,12 @@ consistency, and the expected behavior of each option.
   each new site when the source is in geographic coordinates.
 - **`--lat`/`--lon`** as an alternative to `--cx`/`--cy`.
 - **Built-in Copernicus DEM download** (`--download-copernicus`).
+- **More input formats**: ESRI ASCII Grid, SRTM `.hgt`, GeoPackage raster, NetCDF,
+  NetCDF-4-style HDF5 and LAS/LAZ point clouds, with explicit rules instead of
+  guesses (bands, layers, CRS, units, NoData). GeoTIFFs in Float32/Float64 give
+  byte-identical STL files to before. **Behaviour change**: integer DEMs
+  (e.g. Int16) used to have their *resampled* elevations rounded to whole
+  metres; they are now resampled in floating point.
 - **`island_dem_to_stl.py` removed**: its use case (relief surrounded
   by water) is covered by `--sea-level`, whose approach (circle with a
   flat sea) proved preferable in practice to following the exact

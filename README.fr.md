@@ -84,6 +84,21 @@ sur Debian/Ubuntu, `gdal` sur Arch) — si `pip install gdal` échoue,
 installe GDAL via le gestionnaire de paquets de ton système plutôt que
 pip seul.
 
+**Dépendances optionnelles** (`requirements-optional.txt`) : `laspy` pour les nuages de points LAS
+et `lazrs` pour les `.laz` compressés ; `netCDF4` et `h5py` ne servent qu'aux tests. Sans elles,
+tout le reste fonctionne, et le programme dit ce qui manque quand tu lui donnes un `.las`/`.laz`.
+Sur Arch (où `pip` refuse de toucher à l'environnement système), utilise un environnement virtuel
+qui voit quand même le GDAL du système :
+
+```fish
+python -m venv --system-site-packages .venv
+source .venv/bin/activate.fish
+pip install -r requirements.txt -r requirements-optional.txt
+```
+
+(Les noms de paquets Arch de laspy/lazrs n'ont pas été vérifiés ici ; `pip` dans un venv est la voie
+qui a été testée.)
+
 Un tutoriel complet, pas à pas — de la prise en main rapide sans
 téléchargement jusqu'au traitement d'un vrai relief — est disponible
 dans [TUTORIAL.md](TUTORIAL.md).
@@ -150,7 +165,16 @@ python circle_dem_to_stl.py \
 
 | Option | Description | Défaut |
 |---|---|---|
-| `--input` | GeoTIFF ou VRT source, CRS géographique ou projeté | requis |
+| `--input` | Un ou plusieurs fichiers source : GeoTIFF/VRT, ESRI ASCII Grid (`.asc`), SRTM (`.hgt`), GeoPackage raster (`.gpkg`), NetCDF (`.nc`), HDF5 (`.h5`/`.hdf5`, NetCDF-4/CF seulement), nuage de points LAS/LAZ — voir [Formats d'entrée](#formats-dentrée) | requis |
+| `--layer` | Table raster GeoPackage, variable NetCDF ou dataset HDF5 à lire (obligatoire si le fichier a plusieurs candidats) | aucun |
+| `--band` | Bande à lire : fichier multibande, ou tranche NetCDF/HDF5 (temps, niveau...) — jamais choisie à ta place | aucun |
+| `--source-crs` | CRS d'un fichier qui n'en déclare aucun (p. ex. `EPSG:2056`) ; refusé si le fichier en déclare déjà un | aucun |
+| `--vertical-unit` | `m`, `ft` ou `us-ft` : unité des altitudes, remplace celle déclarée (ou absente) | unité déclarée, sinon mètres + avertissement |
+| `--lidar-select` | LAS/LAZ : `ground` (moyenne des points de classe 2 par cellule), `lowest` ou `highest` par cellule | `ground` |
+| `--lidar-cell` | LAS/LAZ : taille de cellule de la grille du nuage, en m | pixel de travail |
+| `--lidar-interp` | LAS/LAZ : comblement des trous `linear`, `nearest` ou `none` | `linear` |
+| `--lidar-max-gap` | LAS/LAZ : distance maximale de comblement, en m | 50 cellules |
+| `--lidar-spike-m` | LAS/LAZ : tolérance des cellules isolées pic/puits, en m (`0` = désactivé) | 10 |
 | `--output` | Fichier STL de sortie | requis |
 | `--cx`, `--cy` | Centre du cercle, dans le CRS du fichier source | voir `--lat`/`--lon` |
 | `--lat`, `--lon` | Centre du cercle en WGS84 — alternative à `--cx`/`--cy` | voir `--cx`/`--cy` |
@@ -184,6 +208,8 @@ Fournis soit `--cx`/`--cy`, soit `--lat`/`--lon` — pas les deux.
 
 ```
 circle_dem_to_stl.py   # argparse, prompts interactifs, orchestration
+formats.py             # formats d'entrée : détection, règles de lecture par format, normalisation (CRS, unités, NoData)
+lidar.py               # nuages LAS/LAZ : lecture par blocs, filtrage des classes, rastérisation, comblement
 raster.py              # GDAL : ouverture, détection/reprojection CRS, ré-échantillonnage
 mesh.py                # numpy/scipy pur : nettoyage du masque, construction du maillage
 regular_polygon.py     # numpy pur : polygones réguliers (--sides), appartenance exacte, projection, arcs
@@ -192,9 +218,144 @@ download.py            # téléchargement Copernicus DEM (compartiment S3 public
 tests/
 ```
 
+Toute source suit la même chaîne : **détection → lecteur → normalisation (altitudes en mètres,
+CRS connu, NoData marqué) → traitement géospatial (reprojection, découpe, ré-échantillonnage) →
+moteur de maillage commun → export**. Le moteur de maillage (`mesh.py`) ignore tout des formats de
+fichiers. Un nuage de points n'est pas forcé dans un lecteur raster : `lidar.py` le rastérise
+directement sur la grille de travail.
+
 `mesh.py` ne dépend jamais de GDAL ni du disque — testable avec de
 simples tableaux numpy, ce qui permet de vérifier étanchéité et
 cohérence des normales sans jamais ouvrir un fichier.
+
+## Formats d'entrée
+
+`--input` accepte un ou plusieurs fichiers ; le format est reconnu par l'extension et, pour les
+nuages de points, par la signature du fichier. Quel que soit le format, le programme ne devine
+jamais en silence : quand un choix est ambigu (plusieurs bandes, tables ou variables, CRS
+absent, nuage non classifié), il **s'arrête et dit quoi ajouter**. Les niveaux ci-dessous sont
+ceux qui ont réellement été testés.
+
+| Format | Extensions | Niveau | À savoir |
+|---|---|---|---|
+| GeoTIFF, VRT | `.tif` `.tiff` `.vrt` | **pleinement pris en charge** | Toutes les compressions de ton GDAL (DEFLATE, LZW, PackBits, tuiles, BigTIFF ; ZSTD et LERC ont été testés car ce GDAL les a). Int16/UInt16/Int32/Float32/Float64. Une bande, ou `--band N`. |
+| ESRI ASCII Grid | `.asc` | **pleinement pris en charge** | En-tête validé (fichier mal formé ou tronqué refusé, jamais lu à l'aveugle). CRS lu dans le `.prj` voisin, sinon `--source-crs`. |
+| SRTM | `.hgt` | **pleinement pris en charge** | Le nom doit ressembler à `N46E007.hgt` (il porte la position). SRTM1 (3601²) et SRTM3 (1201²). Les vides sont du NoData. Donne les tuiles voisines ensemble pour les assembler. |
+| GeoPackage (raster) | `.gpkg` | **avec sélection** | Uniquement des **tables raster d'altitudes** (une bande Int16/UInt16/Float32). À partir de 2 tables, `--layer TABLE` est obligatoire. Les GeoPackage vectoriels seuls et les tuiles image (RVB, palette) sont refusés : *tout GeoPackage n'est pas un MNT*. |
+| NetCDF | `.nc` | **avec sélection** | Axes spatiaux réguliers (lat/lon ou x/y) requis. Plusieurs variables → `--layer NOM`, sauf si une seule se déclare altitude. Dimensions supplémentaires (temps, niveau) → `--band N`. |
+| HDF5 | `.h5` `.hdf5` | **partiel** | Seulement le HDF5 qui suit le modèle NetCDF-4/CF avec axes spatiaux (lu comme un NetCDF). Un HDF5 générique (datasets bruts) est **signalé comme non pris en charge**, avec la liste de ses datasets. |
+| LAS, LAZ | `.las` `.laz` | **pris en charge, chaîne propre** | Requiert `laspy` (+`lazrs` pour les `.laz`). Classe sol 2 par défaut ; un nuage non classifié exige un `--lidar-select` explicite. Voir [Nuages de points](#nuages-de-points-lasllaz). |
+| Tout autre raster ouvert par GDAL | | lu via GDAL (pas testé spécifiquement) | Mêmes règles de bandes, CRS, unités et NoData. |
+| **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY/XYZ, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
+
+### Règles communes à tous les formats
+
+* **Les altitudes sont converties en mètres** d'après l'unité déclarée (`feet`, `US survey
+  foot`, `cm`, `km`...). On utilise l'unité de la bande, de la variable NetCDF ou de la partie
+  verticale d'un CRS composé ; `--vertical-unit m|ft|us-ft` la remplace. Si rien n'est déclaré,
+  **les mètres sont supposés et un avertissement le dit** ; une unité qui n'est pas une
+  longueur (p. ex. `K`) est refusée. Un `scale`/`offset` déclaré (entiers empaquetés) est
+  appliqué ; un `positive = down` NetCDF (profondeurs) inverse le signe.
+* **Les coordonnées ne sont jamais supposées.** Un fichier sans CRS est refusé tant que tu ne
+  donnes pas `--source-crs EPSG:xxxx` (lui-même refusé si le fichier déclare déjà un CRS).
+  Degrés et mètres sont vérifiés contre l'emprise (un CRS « géographique » avec des
+  coordonnées de 2 600 000 est refusé ; un CRS métrique avec des coordonnées de la taille de
+  degrés déclenche un avertissement). Un NetCDF à axes `degrees_north/east` sans datum est lu en
+  WGS84 **avec un avertissement explicite**. Une source en pieds est reprojetée en mètres
+  (UTM) ; `--radius` est toujours en mètres.
+* **Aucun changement silencieux de datum vertical.** Un CRS composé (p. ex. EPSG:2056+5728)
+  voit sa partie verticale ignorée pour le positionnement, et le journal dit qu'aucune
+  conversion géoïde/ellipsoïde n'a été faite.
+* **Le NoData n'est jamais zéro.** NoData déclaré, NaN/inf, vides SRTM et zone hors de
+  l'emprise du fichier restent du NoData. Les trous jusqu'à 50 pixels sont comblés (le nombre
+  de cellules comblées est journalisé) ; au-delà, ils sont exclus du modèle. Les sources
+  entières sont ré-échantillonnées en virgule flottante.
+* **Aucun sous-échantillonnage silencieux**, et le journal affiche une ligne `entrée ...` par
+  fichier : format, taille, type, CRS, unité, et quelle bande/variable/couche a été choisie.
+
+### Exemples
+
+```bash
+# GeoTIFF multibande : choisir la bande
+python circle_dem_to_stl.py --input mnt.tif --band 2 --cx 2601000 --cy 1201000 --radius 300 --diameter-mm 60 --vexag 1 --output out.stl
+# Altitudes en pieds non déclarées par le fichier
+python circle_dem_to_stl.py --input mnt.tif --vertical-unit ft ...
+# ASC sans .prj
+python circle_dem_to_stl.py --input terrain.asc --source-crs EPSG:2056 ...
+# SRTM : deux tuiles voisines assemblées, centre sur la couture
+python circle_dem_to_stl.py --input N46E007.hgt N46E008.hgt --lat 46.5 --lon 8.0 --radius 3000 ...
+# GeoPackage à plusieurs tables raster
+python circle_dem_to_stl.py --input donnees.gpkg --layer mnt_2m ...
+# NetCDF : variable et pas de temps
+python circle_dem_to_stl.py --input grille.nc --layer elevation --band 3 --lat 46.1 --lon 7.15 --radius 3000 ...
+```
+
+### Nuages de points (LAS/LAZ)
+
+Un nuage de points n'a ni grille, ni NoData, ni résolution native : il n'est **pas** forcé dans
+un lecteur raster. `lidar.py` le lit par blocs de 2 millions de points (mémoire constante) et le
+rastérise **directement sur la grille de travail** (même origine, même pas, même CRS), sans
+ré-échantillonnage supplémentaire sauf si tu demandes `--lidar-cell`.
+
+1. Les points hors de la fenêtre demandée sont écartés d'abord ; le CRS du fichier (enregistrement
+   WKT, enregistrement étendu, ou clés GeoTIFF) est reprojeté bloc par bloc s'il diffère du CRS de travail.
+2. Les points *withheld* et les classes de bruit ASPRS 7 et 18 sont toujours exclus. Avec
+   `--lidar-select ground` (défaut), seule la classe 2 est gardée et chaque cellule prend la
+   **moyenne** de ses points sol ; `lowest`/`highest` prennent le min/max de tous les points
+   gardés. Un nuage **non classifié** avec `ground` est refusé, avec les classes présentes et
+   les alternatives ; `lowest` n'est qu'une approximation du sol (trop haut sous canopée dense
+   ou bâti) et le journal le dit.
+3. Les doublons exacts (mêmes x, y, z) sont retirés dans chaque bloc.
+4. Les cellules isolées aberrantes (pic ou puits dépassant toutes leurs ≥5 voisines valides de
+   plus de `--lidar-spike-m` plus leur propre étendue) sont écartées ; les pentes et falaises ne le sont pas.
+5. Les cellules vides sont comblées selon `--lidar-interp` : `linear` (triangulation de
+   Delaunay des cellules valides autour des trous ; jamais d'extrapolation hors du nuage),
+   `nearest`, ou `none` ; seulement jusqu'à `--lidar-max-gap` (défaut 50 cellules). Le journal
+   dit combien de cellules ont été comblées et combien restent sans donnée, et avertit quand moins
+   de la moitié des cellules contient un point (le détail comblé serait inventé).
+6. `--lidar-cell M` (défaut : le pixel de travail) fixe la cellule de la grille du nuage ; si elle
+   diffère du pixel de travail, la grille est ré-échantillonnée **une seule fois** (bilinéaire si
+   plus grossière, moyenne si plus fine) et le journal le dit.
+
+L'unité d'altitude vient de l'unité verticale du CRS (ou de `--vertical-unit`) ; à défaut, l'unité
+horizontale est supposée, **avec un avertissement**. Un nuage sans CRS exige `--source-crs`.
+Plusieurs fichiers doivent partager un même CRS. Testé sur LAS 1.2/1.3/1.4 (formats de points 0, 1,
+3, 4, 6, 8) et LAZ.
+
+### Erreurs fréquentes et remèdes
+
+| Message (début) | Cause | Remède |
+|---|---|---|
+| `... contient N bandes ... --band N` | fichier multibande ou dimension temps NetCDF/HDF5 | choisis la bande (la liste donne le temps/l'unité de chacune) |
+| `... aucun système de coordonnées ... --source-crs` | pas de CRS dans le fichier | `--source-crs EPSG:xxxx` |
+| `... déclare déjà un CRS` | `--source-crs` donné pour un fichier géoréférencé | retire `--source-crs` |
+| `... impossible en degrés` | CRS géographique déclaré pour des coordonnées en mètres | corrige le CRS du fichier ou donne le bon `--source-crs` |
+| `... n'est pas une unité de longueur` | variable en K, %, ... | ce n'est pas une altitude ; ou force `--vertical-unit` si c'en est une |
+| `fichier ASC tronqué` / `en-tête ASC mal formé` | `.asc` coupé ou mal formé | re-télécharge / régénère le fichier |
+| `tuile SRTM ... le nom doit être ...` | `.hgt` renommé ou dans une archive | rétablis un nom du type `N46E007.hgt`, décompresse |
+| `... N tables raster, choisis-en une avec --layer` | plusieurs tables raster | `--layer TABLE` |
+| `... ne se déclare pas comme une altitude ... --layer` | variable(s) NetCDF non identifiée(s) comme altitude | `--layer NOM` si tu sais que c'en est une |
+| `HDF5 non géoréférencé` | HDF5 générique sans axes | convertis d'abord en GeoTIFF/NetCDF avec `gdal_translate` |
+| `aucun point classé « sol »` | nuage non classifié | classe-le (PDAL `filters.smrf`, LAStools `lasground`) ou `--lidar-select lowest`/`highest` |
+| `la lecture des fichiers LAS/LAZ requiert laspy` / `compressé (LAZ) ... aucun décompresseur` | dépendance optionnelle absente | `pip install laspy lazrs` (dans un venv) |
+| `aucun point du nuage dans la zone demandée` | centre/rayon hors du nuage | vérifie `--cx/--cy` et le CRS du nuage |
+
+### Limites connues
+
+* HDF5 : seulement la structure NetCDF-4/CF ; pas de HDF5 générique, pas de HDF-EOS.
+* NetCDF : une variable et une tranche par exécution ; pas de grilles curvilignes ou irrégulières.
+* GeoPackage : tables raster d'altitudes uniquement. GDAL applique l'échelle/décalage et la
+  précision déclarés par la table : lors de notre test, une table déclarant une précision de 1
+  a rendu des valeurs arrondies au mètre (c'est GDAL qui lit le fichier tel que déclaré).
+* SRTM : fichiers `.hgt` uniquement (pas de `.zip`) ; des tuiles SRTM1 et SRTM3 ne sont pas mélangées dans un assemblage (avertissement).
+* Le datum vertical (géoïde ou ellipsoïde) n'est jamais converti ; une unité non déclarée est supposée en mètres.
+* LAS/LAZ : le fichier entier est lu une fois en flux (le temps croît avec le nombre de points,
+  pas avec la taille de la fenêtre) ; les doublons exacts ne sont retirés qu'au sein d'un bloc de
+  2 millions de points ; `lowest` approxime le sol ; le comblement `linear` peut enjamber une
+  concavité à l'intérieur de l'enveloppe convexe des cellules voisines.
+* Comportement antérieur désormais journalisé : `--min-elevation` (défaut −50 m) écartait
+  auparavant en silence les terrains plus bas ; le nombre de cellules exclues est maintenant affiché.
+
 
 ## Sources de données compatibles
 
@@ -501,6 +662,15 @@ haut : fais pivoter si besoin (le fichier est Z vers le haut).
 pytest tests/
 ```
 
+Les tests de formats d'entrée fabriquent de minuscules fichiers synthétiques (un plan incliné : l'altitude
+attendue de chaque cellule est connue exactement) et vérifient valeurs, taille, orientation, NoData,
+corruption et unités pour chaque format, puis exécutent toute la ligne de commande et mesurent le STL
+obtenu (étanche, faces vers l'extérieur, relief conforme à la pente connue, sommet du bon côté) :
+`tests/test_input_formats.py` (GeoTIFF, ASC, SRTM), `tests/test_input_containers.py` (GeoPackage,
+NetCDF, HDF5), `tests/test_lidar.py` (LAS/LAZ) et `tests/test_input_formats_cli.py`. Les tests LAS/LAZ
+sont ignorés si `laspy` manque, et ceux de NetCDF/HDF5 si `netCDF4`/`h5py` manquent (la raison est
+affichée). Pour un seul module : `pytest tests/test_lidar.py -q`.
+
 Les tests reproduisent les scénarios synthétiques utilisés pendant le
 développement (île conique, artefact isolé, bruit de surface d'eau
 raccordé au littoral, motif en damier) et vérifient l'étanchéité, la
@@ -511,6 +681,11 @@ cohérence des normales, et le comportement attendu de chaque option.
 - **Restructuration modulaire** (`raster.py`/`mesh.py`/`stl_io.py`) : élimine la duplication qui existait entre l'ancien `circle_dem_to_stl.py` monolithique et `island_dem_to_stl.py`.
 - **Reprojection CRS automatique** : plus besoin de `gdalwarp` manuel avant chaque nouveau site quand la source est en coordonnées géographiques.
 - **`--lat`/`--lon`** en alternative à `--cx`/`--cy`.
+- **Davantage de formats d'entrée** : ESRI ASCII Grid, SRTM `.hgt`, GeoPackage raster, NetCDF, HDF5 de
+  type NetCDF-4 et nuages de points LAS/LAZ, avec des règles explicites plutôt que des devinettes (bandes,
+  couches, CRS, unités, NoData). Les GeoTIFF Float32/Float64 donnent des STL identiques octet pour octet à
+  avant. **Changement de comportement** : les MNT entiers (p. ex. Int16) voyaient leurs altitudes
+  *ré-échantillonnées* arrondies au mètre entier ; elles sont désormais ré-échantillonnées en virgule flottante.
 - **`island_dem_to_stl.py` retiré** : son cas d'usage (relief entouré d'eau) est couvert par `--sea-level`, dont l'approche (cercle à mer plate) s'est révélée préférable en pratique à la silhouette exacte du littoral.
 
 ## Licence

@@ -1,0 +1,13 @@
+# Dépendances OPTIONNELLES de dem-to-stl — à installer dans un environnement virtuel :
+#   python -m venv --system-site-packages .venv ; source .venv/bin/activate.fish   (fish)
+#   pip install -r requirements-optional.txt
+# Sans elles, tout fonctionne sauf ce qui est indiqué ci-dessous (le programme le dit alors clairement).
+
+# --- Nuages de points LAS/LAZ (--input fichier.las / fichier.laz) ---
+laspy>=2.0        # lecture LAS 1.0-1.4 ; testé avec 2.7.0
+lazrs>=0.5        # décompression des .laz (alternative à laszip) ; testé avec 0.8.2
+
+# --- Tests uniquement : fabrication de NetCDF / HDF5 par des écrivains indépendants de GDAL ---
+# Sans eux, les tests NetCDF/HDF5 concernés sont ignorés avec la raison affichée.
+netCDF4>=1.6      # testé avec 1.7.5
+h5py>=3.8         # testé avec 3.16.0

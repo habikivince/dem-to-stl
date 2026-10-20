@@ -33,6 +33,7 @@ import unicodedata
 
 import numpy as np
 
+import formats
 import mesh
 import mesh_export
 import geocode
@@ -250,6 +251,27 @@ def validate_print(args):
              f"({args.diameter_mm:g}) : il faut au moins {MIN_GRID_CELLS} cellules sur le diamètre.")
 
 
+def source_options(args):
+    return formats.SourceOptions(
+        layer=args.layer, band=args.band, source_crs=args.source_crs, vertical_unit=args.vertical_unit,
+        lidar_select=args.lidar_select, lidar_cell=args.lidar_cell, lidar_interp=args.lidar_interp,
+        lidar_max_gap=args.lidar_max_gap, lidar_spike_m=args.lidar_spike_m)
+
+
+def validate_source_options(args):
+    opts = source_options(args)
+    given = opts.raster_options() + opts.lidar_options()
+    if given and args.input is None:
+        fail(f"{', '.join(given)} ne s'applique qu'avec --input (fichier fourni par l'utilisateur).")
+    if args.band is not None and args.band < 1:
+        fail("--band commence à 1.")
+    if args.lidar_cell is not None and not _pos(args.lidar_cell):
+        fail("--lidar-cell doit être un nombre strictement positif (mètres).")
+    for name, value in (("--lidar-max-gap", args.lidar_max_gap), ("--lidar-spike-m", args.lidar_spike_m)):
+        if value is not None and (not math.isfinite(value) or value < 0):
+            fail(f"{name} doit être un nombre positif ou nul (mètres).")
+
+
 DEFAULT_CORNER_TOL_MM = 0.005     # flèche maximale admise sur les arcs d'arrondi, en mm imprimés
 MIN_CORNER_TOL_MM = 1e-6          # en dessous, la précision du STL (float32) ne suit plus
 
@@ -389,8 +411,19 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 
     inside = (inside_fn(xs, ys) if inside_fn is not None
               else (xs[None, :] - cx) ** 2 + (ys[:, None] - cy) ** 2 <= radius ** 2)
-    valid = (elev != nodata) if nodata is not None else np.ones_like(elev, dtype=bool)
+    valid = np.isfinite(elev) & ((elev != nodata) if nodata is not None else True)   # NaN/inf ne sont jamais des altitudes
     plausible = valid & (elev > min_elevation)
+    n_zone = int(inside.sum())
+    n_no_data = int((inside & ~valid).sum())
+    n_low = int((inside & valid & ~plausible).sum())
+    if n_no_data:
+        log(f"{n_no_data} cellule(s) sans donnée valide dans la zone ({100.0 * n_no_data / max(n_zone, 1):.1f} %) : "
+            + ("remplacées par le niveau de la mer" if sea_level is not None else
+               "exclues du modèle (trous), le relief n'est jamais inventé"))
+    if n_low:
+        log(f"{n_low} cellule(s) valide(s) de la zone sous --min-elevation ({min_elevation:g} m) "
+            + ("traitée(s) comme artefacts" if sea_level is not None else
+               "EXCLUE(S) : abaisse --min-elevation pour conserver un relief situé sous cette altitude"))
 
     if sea_level is not None:
         # Le bruit de surface de mer (vagues/reflets classés par erreur
@@ -447,8 +480,40 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
 
 def main():
     p = argparse.ArgumentParser(description="Découpe circulaire d'un DEM + export STL solide.")
-    p.add_argument("--input", default=None,
-                    help="GeoTIFF ou VRT source ; omis si --source / --download-copernicus est utilisé")
+    p.add_argument("--input", nargs="+", default=None, metavar="FICHIER",
+                    help="Fichier(s) source : GeoTIFF (.tif), ESRI ASCII Grid (.asc), SRTM (.hgt), GeoPackage "
+                         "raster (.gpkg), NetCDF (.nc), HDF5 géoréférencé (.h5), VRT, tout raster lisible par "
+                         "GDAL, ou nuage de points LAS/LAZ ; plusieurs fichiers = mosaïque (tuiles voisines). "
+                         "Omis si --source / --download-copernicus est utilisé")
+    g = p.add_argument_group("Formats d'entrée (voir README, section « Formats d'entrée »)")
+    g.add_argument("--layer", default=None, metavar="NOM",
+                   help="Table raster GeoPackage, variable NetCDF ou dataset HDF5 à utiliser (obligatoire s'il "
+                        "y en a plusieurs et qu'une seule ne se déclare pas comme une altitude)")
+    g.add_argument("--band", type=int, default=None, metavar="N",
+                   help="Bande à utiliser (à partir de 1) d'un fichier multibande ou d'une variable à dimension "
+                        "supplémentaire (temps...) : jamais choisie à ta place")
+    g.add_argument("--source-crs", default=None, metavar="CRS",
+                   help="CRS à attribuer à un fichier qui n'en déclare aucun (ex. EPSG:2056) ; refusé si le "
+                        "fichier en a déjà un")
+    g.add_argument("--vertical-unit", choices=sorted(formats.VERTICAL_UNIT_CHOICES), default=None,
+                   help="Unité des altitudes si le fichier ne la déclare pas (sinon supposée en mètres, avec "
+                        "avertissement) ou pour corriger celle qu'il déclare")
+    g.add_argument("--lidar-select", choices=["ground", "lowest", "highest"], default=None,
+                   help="LAS/LAZ — points retenus : ground = classe 2 (défaut, exige un nuage classifié), "
+                        "lowest = minimum par cellule (nuage non classifié : approximation du sol), "
+                        "highest = maximum par cellule (surface avec végétation et bâti)")
+    g.add_argument("--lidar-cell", type=float, default=None, metavar="M",
+                   help="LAS/LAZ — taille de la cellule de la grille, en mètres (défaut : pixel de travail, "
+                        "dérivé de --print-spacing-mm)")
+    g.add_argument("--lidar-interp", choices=["linear", "nearest", "none"], default=None,
+                   help="LAS/LAZ — comblement des cellules sans point : linear = triangulation (défaut), "
+                        "nearest = valeur de la cellule remplie la plus proche, none = aucun")
+    g.add_argument("--lidar-max-gap", type=float, default=None, metavar="M",
+                   help="LAS/LAZ — distance maximale de comblement, en mètres (défaut : 50 cellules) ; au-delà, "
+                        "les cellules restent sans donnée")
+    g.add_argument("--lidar-spike-m", type=float, default=None, metavar="M",
+                   help="LAS/LAZ — une cellule isolée dépassant tous ses voisins de plus de cette marge "
+                        "(en plus de leur étendue) est écartée comme aberrante (défaut 10 ; 0 = désactivé)")
     p.add_argument("--output", default=None,
                     help="Fichier de sortie. Sans dossier, il est placé dans --output-dir ; avec un dossier, il est "
                          "respecté. L'extension (.stl, .3mf, .obj) choisit le format. Facultatif : le nom est alors "
@@ -659,6 +724,7 @@ def main():
             sys.exit("Erreur : ne fournis pas --input en même temps que --source / --download-copernicus.")
     elif args.input is None:
         sys.exit("Erreur : fournis --input, ou utilise --source (ou --download-copernicus).")
+    validate_source_options(args)
 
     if args.fill_with_copernicus and not have_latlon:
         sys.exit("Erreur : --fill-with-copernicus requiert --lat/--lon (ou --place).")
@@ -691,6 +757,15 @@ def main():
         log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
             + ", ".join(os.path.abspath(p) for p in paths.values()))
         return
+    input_kind = "raster"
+    if args.input is not None:
+        # détection du format -> lecteur adapté -> normalisation (voir formats.py) ; échoue ici, avant d'écrire
+        try:
+            input_kind, args.input = formats.prepare(args.input, source_options(args), log=raster.log)
+        except raster.InputError as e:
+            fail(str(e))
+        if input_kind == "lidar" and args.fill_with_copernicus:
+            fail("--fill-with-copernicus est incompatible avec une entrée LAS/LAZ.")
     prepare_outputs(paths)
 
     used = None
