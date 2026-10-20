@@ -15,6 +15,12 @@ Exemple (Cervin, 150 mm, rayon 3 km, socle 3 mm) :
 
 Sans --radius (mode polygone) l'échelle n'est pas connue : seuls les contrôles de
 dimension, de socle et d'étanchéité sont faits.
+
+Pièce générée avec --sides (polygone régulier) : --diameter-mm reste le diamètre du cercle de référence et les
+dimensions attendues sont celles de l'encombrement exact du polygone (regular_polygon.py, géométrie seule : le
+code de maillage n'est toujours pas réutilisé) :
+  python check_stl.py hexagone.stl --diameter-mm 60 --base-mm 3 --radius 300 \
+      --sides 6 --circle-mode circumscribed --corner-radius 2
 """
 import argparse
 import sys
@@ -83,16 +89,26 @@ def degenerate_count(tris, block=1_000_000):
     return n
 
 
-def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, tol_mm=None, watertight=True):
-    """Liste de (nom, ok, détail). tol_mm : tolérance sur les dimensions (défaut 1 % du diamètre)."""
+def check(tris, diameter_mm, base_mm, radius_m=None, vexag=1.0, relief_m=None, tol_mm=None, watertight=True,
+          shape_mm=None):
+    """Liste de (nom, ok, détail). tol_mm : tolérance sur les dimensions (défaut 1 % du diamètre).
+    shape_mm : RegularPolygon (regular_polygon.py) exprimé en mm imprimés, pour une pièce générée avec --sides :
+    les dimensions attendues sont alors celles de son encombrement exact (et non plus le diamètre)."""
     tol_mm = 0.01 * diameter_mm if tol_mm is None else tol_mm
     mins, maxs = tris.reshape(-1, 3).min(axis=0), tris.reshape(-1, 3).max(axis=0)
     dx, dy = maxs[0] - mins[0], maxs[1] - mins[1]
     zmax = maxs[2]
     results = []
-    results.append(("plus grande dimension horizontale",
-                    abs(max(dx, dy) - diameter_mm) <= tol_mm,
-                    f"{max(dx, dy):.2f} mm (attendu {diameter_mm:g} ± {tol_mm:.2f})"))
+    if shape_mm is None:
+        results.append(("plus grande dimension horizontale",
+                        abs(max(dx, dy) - diameter_mm) <= tol_mm,
+                        f"{max(dx, dy):.2f} mm (attendu {diameter_mm:g} ± {tol_mm:.2f})"))
+    else:
+        x0, x1, y0, y1 = shape_mm.bbox()
+        w, h = x1 - x0, y1 - y0
+        results.append(("dimensions de la pièce (forme --sides)",
+                        abs(dx - w) <= tol_mm and abs(dy - h) <= tol_mm,
+                        f"{dx:.2f} x {dy:.2f} mm (attendu {w:.2f} x {h:.2f} ± {tol_mm:.2f})"))
     results.append(("socle", abs(mins[2] + base_mm) <= 0.01,
                     f"fond à z = {mins[2]:.3f} mm (attendu {-base_mm:g})"))
     results.append(("hauteur totale", True, f"{zmax - mins[2]:.2f} mm (sommet z = {zmax:.2f} mm au-dessus de l'altitude minimale)"))
@@ -130,7 +146,23 @@ def main():
                    help="dénivelé attendu en mètres (ex. maximum - minimum de gdalinfo -stats), tolérance 1 %%")
     p.add_argument("--tol-mm", type=float, default=None, help="tolérance sur les dimensions (défaut 1 %% du diamètre)")
     p.add_argument("--no-watertight", action="store_true", help="saute le test d'étanchéité (gros fichiers)")
+    p.add_argument("--sides", type=int, default=None,
+                   help="pièce générée avec --sides : contrôle l'encombrement exact du polygone (avec --circle-mode, "
+                        "--corner-radius en mm, --rotation ; --diameter-mm reste le diamètre du cercle de référence)")
+    p.add_argument("--circle-mode", choices=("inscribed", "circumscribed"), default=None)
+    p.add_argument("--corner-radius", type=float, default=0.0, help="rayon d'arrondi en mm imprimés")
+    p.add_argument("--rotation", type=float, default=0.0)
     args = p.parse_args()
+    shape_mm = None
+    if args.sides is not None:
+        if args.circle_mode is None:
+            sys.exit("Erreur : --sides requiert --circle-mode.")
+        import regular_polygon
+        try:
+            shape_mm = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.diameter_mm / 2.0,
+                                                      args.corner_radius, args.rotation)
+        except regular_polygon.ShapeError as e:
+            sys.exit(f"Erreur : {e}")
     try:
         import mesh_export
         tris = mesh_export.read_triangles(args.stl)
@@ -138,7 +170,7 @@ def main():
         sys.exit(f"Erreur : {e}")
     print(f"{args.stl} : {len(tris)} triangles")
     results = check(tris, args.diameter_mm, args.base_mm, args.radius, args.vexag, args.relief_m,
-                    args.tol_mm, not args.no_watertight)
+                    args.tol_mm, not args.no_watertight, shape_mm)
     for name, ok, detail in results:
         print(f"[{'OK ' if ok else 'ÉCHEC'}] {name} : {detail}")
     sys.exit(0 if all(ok for _, ok, _ in results) else 1)

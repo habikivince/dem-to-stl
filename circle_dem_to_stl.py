@@ -38,6 +38,7 @@ import mesh_export
 import geocode
 import polygon
 import raster
+import regular_polygon
 import sources
 import stl_io
 
@@ -73,15 +74,19 @@ def available_ram_bytes():
     return None
 
 
-def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False, bottom="grid"):
+def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False, bottom="grid", area_mm2=None, size_mm=None):
     """Estimation (grille n x n, triangles, taille STL, RAM) d'après le pas d'impression.
     Cercle : pi*n^2 triangles ; contour : borne haute 4*n^2. Constantes mesurées sur un cas
     de 4,9 M de triangles ; au-delà de ce cas, c'est une extrapolation. Avec un fond fusionné
     (--bottom merged ou merged-rows), le fond ne compte plus : environ la moitié des triangles
     (mesuré à Ø250 mm : pic de 645 Mo pour 840 Mo estimés). Avec --top adaptive, c'est une borne
-    haute (le nombre réel de triangles dépend du relief)."""
-    n = diameter_mm / spacing_mm
+    haute (le nombre réel de triangles dépend du relief). Avec une forme (--sides) : area_mm2 est son aire
+    imprimée et size_mm sa plus grande dimension ; la borne est alors 4 x aire / pas² (même formule que
+    le disque : pour Ø D, 4 x (pi D²/4) / pas² = pi n²)."""
+    n = (diameter_mm if size_mm is None else size_mm) / spacing_mm
     triangles = (4.0 if polygon_mode else math.pi) * n * n
+    if area_mm2 is not None:
+        triangles = 4.0 * area_mm2 / (spacing_mm * spacing_mm)
     if bottom != "grid":
         triangles /= 2
     return {"grid": n, "triangles": triangles, "stl_bytes": 84 + 50 * triangles,
@@ -89,8 +94,8 @@ def estimate_resources(diameter_mm, spacing_mm, polygon_mode=False, bottom="grid
 
 
 def check_resources(diameter_mm, spacing_mm, polygon_mode, force, log=print, ram_available=available_ram_bytes,
-                    formats=("stl",), bottom="grid"):
-    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode, bottom)
+                    formats=("stl",), bottom="grid", area_mm2=None, size_mm=None):
+    est = estimate_resources(diameter_mm, spacing_mm, polygon_mode, bottom, area_mm2, size_mm)
     avail = ram_available()
     sizes = ", ".join(f"{f.upper()} ~{est['stl_bytes'] * FORMAT_SIZE_RATIO[f] / 1e6:.0f} Mo" for f in formats)
     log(f"Estimation : grille ~{est['grid']:.0f}², ~{est['triangles'] / 1e6:.1f} M triangles, "
@@ -134,6 +139,11 @@ def default_stem(args):
     else:
         base = f"x{args.cx:.0f}_y{args.cy:.0f}".replace("-", "m")
     name = f"{base}_{args.diameter_mm:g}mm"
+    sides = getattr(args, "sides", None)
+    if sides is not None:
+        name += f"_{sides}cotes-{'inscrit' if args.circle_mode == 'inscribed' else 'circonscrit'}"
+        if getattr(args, "corner_radius", None):
+            name += f"_r{args.corner_radius:g}mm"
     return name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
 
 
@@ -240,6 +250,62 @@ def validate_print(args):
              f"({args.diameter_mm:g}) : il faut au moins {MIN_GRID_CELLS} cellules sur le diamètre.")
 
 
+DEFAULT_CORNER_TOL_MM = 0.005     # flèche maximale admise sur les arcs d'arrondi, en mm imprimés
+MIN_CORNER_TOL_MM = 1e-6          # en dessous, la précision du STL (float32) ne suit plus
+
+
+def build_shape(args, log=log):
+    """Polygone régulier (en mètres de terrain) décrit par --sides, --circle-mode, --corner-radius, --rotation.
+    Le cercle de référence est celui de --radius (mètres de terrain) et de --diameter-mm (son diamètre imprimé) :
+    même échelle que pour un disque. --corner-radius est donné en mm imprimés. Échoue avec un message clair ;
+    renseigne args.corner_tol_mm (défaut DEFAULT_CORNER_TOL_MM)."""
+    if not regular_polygon.MIN_SIDES <= args.sides <= regular_polygon.MAX_SIDES:
+        fail(f"--sides doit être compris entre {regular_polygon.MIN_SIDES} et {regular_polygon.MAX_SIDES} "
+             f"(reçu : {args.sides}).")
+    scale = (args.diameter_mm / 2.0) / args.radius                  # mm imprimés par mètre de terrain
+    corner_mm = 0.0 if args.corner_radius is None else args.corner_radius
+    rotation = 0.0 if args.rotation is None else args.rotation
+    if not (math.isfinite(corner_mm) and corner_mm >= 0):
+        fail("--corner-radius doit être un nombre positif ou nul (en mm imprimés ; 0 = angles vifs).")
+    if not math.isfinite(rotation):
+        fail("--rotation doit être un nombre fini (en degrés, sens antihoraire).")
+    if args.corner_tol_mm is None:
+        args.corner_tol_mm = DEFAULT_CORNER_TOL_MM
+    if not (math.isfinite(args.corner_tol_mm) and args.corner_tol_mm >= MIN_CORNER_TOL_MM):
+        fail(f"--corner-tol-mm doit être un nombre >= {MIN_CORNER_TOL_MM:g} (en mm imprimés).")
+    if args.corner_segments is not None and args.corner_segments < 1:
+        fail("--corner-segments doit être un entier >= 1.")
+    try:
+        sharp = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.radius, 0.0, rotation)
+    except regular_polygon.ShapeError as e:
+        fail(str(e))
+    apothem_mm = sharp.apothem * scale
+    if corner_mm > apothem_mm * (1.0 + 1e-9):
+        fail(f"--corner-radius ({corner_mm:g} mm) dépasse l'apothème de la forme ({apothem_mm:.4g} mm) : les "
+             f"arrondis de deux sommets voisins se chevaucheraient. Maximum : {apothem_mm:.4g} mm "
+             f"(à cette valeur, le contour devient un cercle de rayon {apothem_mm:.4g} mm).")
+    shape = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.radius, min(corner_mm / scale, sharp.apothem),
+                                           rotation)
+    shape_mm = shape.scaled(scale)
+    try:
+        k = shape_mm.arc_segments(args.corner_tol_mm, args.corner_segments)
+    except regular_polygon.ShapeError as e:
+        fail(f"{e} Augmente --corner-tol-mm ou fixe --corner-segments.")
+    xmin, xmax, ymin, ymax = shape_mm.bbox()
+    log("forme : " + shape_mm.describe("mm", 2))
+    log(f"pièce : {xmax - xmin:.2f} x {ymax - ymin:.2f} mm (cercle de référence : Ø {2 * shape_mm.ref_radius:.2f} mm "
+        f"= --diameter-mm), aire {shape_mm.area():.1f} mm²")
+    if corner_mm > 0:
+        sag = corner_mm * (1.0 - math.cos(shape.half_angle / k))
+        log(f"arrondi : {k} segment(s) par arc, flèche maximale {sag:.5f} mm "
+            + ("(imposé par --corner-segments)" if args.corner_segments is not None
+               else f"(tolérance demandée {args.corner_tol_mm:g} mm)"))
+        if corner_mm < args.print_spacing_mm:
+            log(f"ATTENTION : rayon d'arrondi ({corner_mm:g} mm) inférieur au pas d'impression "
+                f"({args.print_spacing_mm:g} mm) : le maillage du dessus ne le résout pas, seul le bord exact le suit.")
+    return shape
+
+
 def progress(i, n, label):
     """Barre de progression légère, sans dépendance externe, pour les
     boucles Python pures (parois, écriture STL) qui ne bénéficient pas
@@ -263,10 +329,33 @@ def ask_float(question, default):
         return default
 
 
+def check_shape_coverage(shape, inside, kept, xs, ys, depth_m, scale):
+    """Refuse un masque de données qui ne couvre pas la forme. Le bord exact d'un polygone projette les nœuds de
+    bord du masque sur le contour théorique : si une partie de la forme est sans donnée (DEM trop petit, nodata,
+    valeurs sous --min-elevation), le bord du masque est loin du contour et la projection étirerait le maillage
+    sur des dizaines de pas. Seules comptent les cellules à plus de `depth_m` (mètres) du bord de la forme ;
+    l'ouverture morphologique n'en retire jamais (elle ne mange qu'une cellule)."""
+    missing = inside & ~kept
+    if not missing.any():
+        return
+    ii, jj = np.nonzero(missing)
+    gx, gy = xs[jj], ys[ii]
+    px, py = shape.project(gx, gy)
+    depth = np.hypot(px - gx, py - gy)
+    deep = depth > depth_m
+    if deep.any():
+        fail(f"{int(deep.sum())} point(s) de la grille, à l'intérieur de la forme et jusqu'à "
+             f"{depth[deep].max() * scale:.1f} mm imprimés de son bord, n'ont pas de donnée valide : le DEM ne couvre "
+             f"pas toute la forme (rappel : un polygone circonscrit dépasse le cercle de référence), ou contient des "
+             f"valeurs sans donnée ou inférieures à --min-elevation. Un bord exact ne peut pas suivre un masque "
+             f"incomplet. Fournis un DEM plus grand, ou utilise --sea-level (zone d'eau) ou --fill-with-copernicus.")
+
+
 def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm,
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
                 smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
-                diagonal="fixed", top="grid", top_tol_mm=0.05):
+                diagonal="fixed", top="grid", top_tol_mm=0.05, shape=None, corner_tol_mm=DEFAULT_CORNER_TOL_MM,
+                corner_segments=None):
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     clip_rings = None
@@ -285,7 +374,15 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
     pixel_size_m = print_spacing_mm / scale
     log(f"échelle : {scale:.6f} mm/m | résolution de ré-échantillonnage : {pixel_size_m:.3f} m/pixel")
 
-    elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m,
+    window_radius, outline = radius, None
+    if shape is not None:
+        # polygone régulier (--sides) : `radius` reste celui du cercle de référence (il fixe l'échelle) ; la fenêtre
+        # du DEM enveloppe la forme, le masque est le test exact d'appartenance, le bord est le contour exact
+        inside_fn = lambda xs_, ys_: shape.contains(xs_[None, :] - cx, ys_[:, None] - cy)  # noqa: E731
+        window_radius = shape.half_extent()
+        outline = shape.scaled(scale).discretize(corner_tol_mm, corner_segments)
+
+    elev, xs, ys, nodata = raster.warp_window(input_path, dst_srs_wkt, cx, cy, window_radius, pixel_size_m,
                                               inside_fn=inside_fn, resample=resample)
     H, W = elev.shape
     log(f"grille ré-échantillonnée : {W} x {H} points")
@@ -332,7 +429,10 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
     if not quad_ok.any():
         sys.exit("Erreur : zone trop petite par rapport à la résolution de ré-échantillonnage "
                   "(ou vide après nettoyage morphologique).")
-    log(f"{int(quad_ok.sum())} cellules incluses dans {'le contour' if clip is not None else 'le disque'}")
+    if shape is not None:
+        check_shape_coverage(shape, inside, clean_mask, xs - cx, ys - cy, 3.0 * pixel_size_m, scale)
+    log(f"{int(quad_ok.sum())} cellules incluses dans "
+        f"{'le contour' if clip is not None else 'la forme' if shape is not None else 'le disque'}")
 
     min_elev = sea_level if sea_level is not None else elev[clean_mask].min()
 
@@ -340,7 +440,7 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         elev, quad_ok, xs - cx, ys - cy, scale, vexag, base_mm, min_elev, progress=progress,
         smooth_wall=smooth_wall, circle_radius_mm=(radius * scale if smooth_wall else None),
         bottom=bottom, bottom_max_cells=bottom_max_cells, diagonal=diagonal,
-        top=top, top_tol_mm=top_tol_mm)
+        top=top, top_tol_mm=top_tol_mm, outline=outline)
     log(f"{n_top} triangles (dessus) + {n_bot} (dessous) + {n_wall} (paroi) = {len(tris)} triangles au total")
     return tris
 
@@ -399,7 +499,8 @@ def main():
     p.add_argument("--polygon-where", default=None,
                     help="Filtre d'attributs OGR pour choisir des entités du contour, ex. \"NAME='Corse'\"")
     p.add_argument("--radius", type=float, default=None,
-                    help="Rayon du cercle, en mètres (requis sans --polygon)")
+                    help="Rayon du cercle, en mètres (requis sans --polygon). Avec --sides : rayon du cercle de "
+                         "référence du polygone")
     p.add_argument("--diameter-mm", type=float, default=None,
                     help="Diamètre final imprimé, en mm (demandé interactivement si omis)")
     p.add_argument("--vexag", type=float, default=None,
@@ -446,6 +547,29 @@ def main():
                     help="Bord parfaitement circulaire (contour en escalier projeté radialement "
                          "vers le vrai cercle) au lieu de suivre la grille de ré-échantillonnage. "
                          "Requiert un masque à un seul contour simple.")
+    p.add_argument("--sides", type=int, default=None,
+                    help=f"Polygone régulier à N côtés ({regular_polygon.MIN_SIDES} à {regular_polygon.MAX_SIDES}) "
+                         "à la place du disque, associé au cercle de référence (--radius, --diameter-mm). "
+                         "Requiert --circle-mode. Incompatible avec --polygon, --clip-to-place, --smooth-wall. "
+                         "Orientation par défaut : un sommet au nord pour N impair, un côté au nord pour N pair.")
+    p.add_argument("--circle-mode", choices=regular_polygon.CIRCLE_MODES, default=None,
+                    help="Avec --sides : inscribed = les sommets sont sur le cercle de référence ; circumscribed = "
+                         "les côtés sont tangents au cercle de référence (la pièce dépasse alors de --diameter-mm). "
+                         "Le cercle de référence décrit toujours le polygone à angles vifs, même arrondi.")
+    p.add_argument("--corner-radius", type=float, default=None,
+                    help="Avec --sides : rayon d'arrondi des sommets, en mm imprimés (raccordement tangent exact "
+                         "aux côtés ; 0 ou omis = angles vifs). Maximum : l'apothème de la pièce (à ce maximum, le "
+                         "contour devient un cercle).")
+    p.add_argument("--rotation", type=float, default=None,
+                    help="Avec --sides : rotation du polygone autour du centre, en degrés, sens antihoraire "
+                         "(défaut 0 = orientation par défaut)")
+    p.add_argument("--corner-tol-mm", type=float, default=None,
+                    help=f"Avec --sides et --corner-radius : flèche maximale admise entre un arc d'arrondi et ses "
+                         f"cordes, en mm imprimés (défaut {DEFAULT_CORNER_TOL_MM:g}). Les sommets du maillage sont "
+                         f"sur l'arc exact : l'écart est d'un seul côté (cordes à l'intérieur) et borné.")
+    p.add_argument("--corner-segments", type=int, default=None,
+                    help="Avec --sides et --corner-radius : nombre de segments par arc d'arrondi, imposé "
+                         "(remplace --corner-tol-mm)")
     p.add_argument("--download-copernicus", action="store_true",
                     help="Équivalent de --source copernicus (conservé pour compatibilité)")
     p.add_argument("--source", choices=["auto", "copernicus"] + sorted(sources.SOURCES), default=None,
@@ -457,6 +581,22 @@ def main():
     p.add_argument("--cache-dir", default="./copernicus_cache",
                     help="Dossier de cache des données téléchargées (Copernicus et sources nationales)")
     args = p.parse_args()
+
+    if args.sides is None:
+        stray = [n for n, v in (("--circle-mode", args.circle_mode), ("--corner-radius", args.corner_radius),
+                                ("--rotation", args.rotation), ("--corner-tol-mm", args.corner_tol_mm),
+                                ("--corner-segments", args.corner_segments)) if v is not None]
+        if stray:
+            sys.exit("Erreur : " + ", ".join(stray) + " requiert --sides (polygone régulier).")
+    else:
+        bad = [n for n, v in (("--polygon", args.polygon), ("--clip-to-place", args.clip_to_place or None),
+                              ("--smooth-wall", args.smooth_wall or None)) if v is not None]
+        if bad:
+            sys.exit("Erreur : --sides est incompatible avec " + ", ".join(bad)
+                     + " (le contour exact du polygone remplace déjà le bord lissé ; la forme vient de --sides).")
+        if args.circle_mode is None:
+            sys.exit("Erreur : --sides requiert --circle-mode inscribed|circumscribed (polygone inscrit dans le "
+                     "cercle de référence, ou circonscrit à lui).")
 
     clip = None
     if args.polygon:
@@ -533,9 +673,20 @@ def main():
         args.vexag = ask_float("Exagération verticale", 1.0)
 
     validate_print(args)
+    shape = build_shape(args, log=raster.log) if args.sides is not None else None
+    # rayon du disque dont les données sont à récupérer : le cercle de référence, ou (forme) le disque qui contient
+    # toute la pièce (rayon extrême du contour : un polygone circonscrit dépasse le cercle de référence). Les
+    # sources ajoutent leurs propres marges ; la fenêtre de travail (demi-côté du carré englobant) est incluse.
+    data_radius = args.radius if shape is None else shape.extreme_radius
     paths = resolve_outputs(args)
+    est_kw = {}
+    if shape is not None:
+        scale = (args.diameter_mm / 2.0) / args.radius
+        shape_mm = shape.scaled(scale)
+        xmin, xmax, ymin, ymax = shape_mm.bbox()
+        est_kw = {"area_mm2": shape_mm.area(), "size_mm": max(xmax - xmin, ymax - ymin)}
     check_resources(args.diameter_mm, args.print_spacing_mm, clip is not None, args.force, log=raster.log,
-                    formats=tuple(paths), bottom=args.bottom)
+                    formats=tuple(paths), bottom=args.bottom, **est_kw)
     if args.dry_run:
         log("--dry-run : aucun téléchargement, calcul ni écriture. Fichiers prévus : "
             + ", ".join(os.path.abspath(p) for p in paths.values()))
@@ -551,7 +702,7 @@ def main():
             pixel_size_m = sources.FULL_RES_PIXEL_M
         try:
             used, args.input = sources.acquire(
-                source, args.lat, args.lon, args.radius, args.cache_dir, pixel_size_m,
+                source, args.lat, args.lon, data_radius, args.cache_dir, pixel_size_m,
                 copernicus_product=args.copernicus_product, log=raster.log)
         except (sources.SourceUnavailable, RuntimeError) as e:
             if args.debug:
@@ -564,7 +715,7 @@ def main():
             raster.log("--fill-with-copernicus ignoré : la source principale est déjà Copernicus")
         else:
             args.input = sources.with_copernicus_fill(
-                args.input, args.lat, args.lon, args.radius, args.cache_dir,
+                args.input, args.lat, args.lon, data_radius, args.cache_dir,
                 product_m=args.copernicus_product, log=raster.log)
 
     if args.top == "adaptive" and args.diagonal != "fixed":
@@ -579,7 +730,9 @@ def main():
                           land_threshold=args.land_threshold, smooth_wall=args.smooth_wall, clip=clip,
                           resample=args.resample, bottom=args.bottom,
                           bottom_max_cells=args.bottom_max_cells or None, diagonal=args.diagonal,
-                          top=args.top, top_tol_mm=args.top_tol_mm)
+                          top=args.top, top_tol_mm=args.top_tol_mm, shape=shape,
+                          corner_tol_mm=args.corner_tol_mm if shape is not None else DEFAULT_CORNER_TOL_MM,
+                          corner_segments=args.corner_segments)
     except raster.InputError as e:
         fail(str(e))
     except RuntimeError as e:
@@ -597,6 +750,11 @@ def main():
     description = (f"Relief DEM : {'plus grande dimension' if clip is not None else 'diamètre'} {args.diameter_mm:g} mm, "
                    f"exagération verticale x{args.vexag:g}, socle {args.base_mm:g} mm"
                    + (f", source {used}" if used else ""))
+    if shape is not None:
+        description = (f"Relief DEM : {shape.name()} {args.circle_mode} (cercle de référence Ø {args.diameter_mm:g} mm"
+                       + (f", sommets arrondis r = {args.corner_radius:g} mm" if args.corner_radius else "")
+                       + f"), exagération verticale x{args.vexag:g}, socle {args.base_mm:g} mm"
+                       + (f", source {used}" if used else ""))
     write_outputs(tris, paths, stem, description, attribution, progress=progress)
     log("Terminé : " + ", ".join(os.path.abspath(p) for p in paths.values()))
 

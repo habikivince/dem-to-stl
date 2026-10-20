@@ -35,6 +35,8 @@ welcome.
  
 - Circular clipping of a DEM around a center point and radius, with
   precise physical scaling to a target printed diameter.
+- Regular polygons (3 to 360 sides) inscribed in or circumscribed about a reference circle, with sharp
+  corners or exact tangent-arc rounding (`--sides`, see below).
 - Guaranteed watertight mesh (verified: every edge shared by exactly
   2 triangles) and consistent normals (positive signed volume).
 - Automatic removal of walls too thin to print in FDM (morphological
@@ -148,7 +150,7 @@ python circle_dem_to_stl.py \
 | `--output` | Output STL file | required |
 | `--cx`, `--cy` | Circle center, in the source file's CRS | see `--lat`/`--lon` |
 | `--lat`, `--lon` | Circle center in WGS84 — alternative to `--cx`/`--cy` | see `--cx`/`--cy` |
-| `--radius` | Circle radius, in meters | required |
+| `--radius` | Circle radius (reference circle with `--sides`), in meters | required |
 | `--diameter-mm` | Final printed diameter, in mm | prompted if omitted (250) |
 | `--base-mm` | Flat base thickness, in mm | prompted if omitted (3) |
 | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
@@ -159,6 +161,12 @@ python circle_dem_to_stl.py \
 | `--diagonal` | Cell diagonal of the top surface: `fixed`, `adaptive` (prototype) | `fixed` |
 | `--bottom` | Flat-bottom triangulation: `grid`, `merged` (prototype), `merged-rows` (comparison) | `grid` |
 | `--bottom-max-cells` | With `merged-rows`: maximum rectangle side, in cells (0 = unlimited) | 0 |
+| `--sides` | Regular N-gon (3-360) instead of the disc (see below) | disabled |
+| `--circle-mode` | With `--sides`: `inscribed` (vertices on the reference circle) or `circumscribed` (sides tangent) | required with `--sides` |
+| `--corner-radius` | With `--sides`: corner rounding radius, in printed mm | 0 (sharp) |
+| `--rotation` | With `--sides`: rotation in degrees, counter-clockwise | 0 |
+| `--corner-tol-mm` | With `--sides` and `--corner-radius`: maximum arc sagitta, in printed mm | 0.005 |
+| `--corner-segments` | With `--sides` and `--corner-radius`: segments per arc (replaces `--corner-tol-mm`) | computed |
 | `--sea-level` | Enables island mode at this elevation (m) | disabled |
 | `--min-elevation` | Threshold for excluding interpolation artifacts, in m | -50 |
 | `--land-threshold` | Land/water-noise threshold above `--sea-level`, in m | 1.0 |
@@ -174,6 +182,7 @@ Provide either `--cx`/`--cy` or `--lat`/`--lon` — not both.
 circle_dem_to_stl.py   # argparse, interactive prompts, orchestration
 raster.py              # GDAL: opening, CRS detection/reprojection, resampling
 mesh.py                # pure numpy/scipy: mask cleanup, mesh construction
+regular_polygon.py     # pure numpy: regular polygons (--sides), exact membership, projection, arcs
 stl_io.py              # binary STL writing
 download.py            # Copernicus DEM download (public S3 bucket)
 tests/
@@ -318,6 +327,36 @@ fill is abandoned if that shift exceeds 50 m. Limits: Copernicus is a surface mo
 (trees, buildings) at 30 m, the national data are usually bare-earth, so the
 junction shows a resolution and character change; the log reports the share of the
 disc filled.
+
+### Regular polygons (`--sides`)
+
+Instead of a disc, a regular N-gon (3 to 360 sides) tied to a **reference circle**, with optionally rounded
+corners:
+
+```
+python circle_dem_to_stl.py --input dem.tif --cx 2601000 --cy 1201000 --radius 300 --diameter-mm 60 \
+    --base-mm 3 --sides 6 --circle-mode circumscribed --corner-radius 2 --output hexagon.stl
+```
+
+* The reference circle is the one given by `--radius` (ground metres) and `--diameter-mm` (its printed diameter):
+  same scale as a disc. `--circle-mode` is mandatory: `inscribed` (vertices lie on the circle) or `circumscribed`
+  (sides are tangent to the circle). In circumscribed mode the part **exceeds** `--diameter-mm` (by up to a factor
+  1/cos(π/N) at the vertices): the log and `--dry-run` print the real printed size (`pièce : W x H mm`).
+* `--corner-radius R` rounds the corners with circular arcs tangent to the sides, `R` in **printed mm** (0 or
+  omitted: sharp corners). Maximum: the apothem of the part; at that value the outline becomes a circle.
+  The reference circle always describes the sharp polygon, even when rounded, so a rounded part is slightly
+  smaller at the corners (extreme radius of the outline: (a − R)/cos(π/N) + R, printed in the log).
+* Default orientation: a vertex pointing north for odd N, a side facing north for even N. `--rotation` turns it
+  by that many degrees, counter-clockwise.
+* The edge is **exact**: straight sides (no staircase), vertices and tangent points on the theoretical outline,
+  vertical wall. Arcs are split so that the chord-to-arc gap never exceeds `--corner-tol-mm` (default 0.005 mm
+  printed; vertices lie on the arc, chords inside it), or into `--corner-segments` segments per arc if you
+  prefer to force that number. The log gives the segment count and the resulting gap.
+* Incompatible with `--polygon`, `--clip-to-place` and `--smooth-wall`. Like `--smooth-wall`, the mask must be
+  a single piece without holes: use `--sea-level` or `--fill-with-copernicus` for areas without data.
+  Downloaded data (`--source`, `--download-copernicus`) covers the disc that encloses the whole part.
+* `check_stl.py` accepts the same `--sides`, `--circle-mode`, `--corner-radius` (mm) and `--rotation` to check
+  the exact footprint of the part.
 
 ### Cutting by polygon (`--polygon`)
 

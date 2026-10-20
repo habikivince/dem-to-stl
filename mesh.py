@@ -144,6 +144,155 @@ def build_smooth_rim(loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm):
     return band_tris, wall_tris, bottom_band_tris
 
 
+def split_collinear_slivers(tris, rel_tol=1e-12):
+    """Retire les triangles d'aire nulle à trois sommets DISTINCTS alignés (u, m, v avec m entre u et v) sans ouvrir
+    le maillage : l'arête longue (u, v) est partagée avec un voisin (v, u, w), qui est scindé en (v, m, w) et
+    (m, u, w). Même surface, même étanchéité, plus de triangle plat (ce que check_stl.py signale comme dégénéré).
+    ``tris`` : liste de triangles, chacun trois tuples (x, y, z) ; les sommets partagés doivent être strictement
+    identiques. Un triangle dont le voisin est absent de la liste ou lui-même plat est conservé tel quel.
+    Les triangles à sommets confondus ne sont pas concernés (voir drop_degenerate)."""
+    if not tris:
+        return tris
+    arr = np.asarray(tris, dtype=np.float64)
+    e = [arr[:, (i + 1) % 3] - arr[:, i] for i in range(3)]          # e[i] : sommet i -> sommet i+1
+    len2 = np.stack([np.einsum("ij,ij->i", v, v) for v in e], axis=1)
+    longest = len2.max(axis=1)
+    area2 = np.linalg.norm(np.cross(e[0], -e[2]), axis=1)
+    flat = (area2 <= rel_tol * longest) & (longest > 0) & (len2.min(axis=1) > 0)
+    if not flat.any():
+        return tris
+    owner = {}
+    for idx, (p0, p1, p2) in enumerate(tris):
+        owner[(p0, p1)] = idx
+        owner[(p1, p2)] = idx
+        owner[(p2, p0)] = idx
+    drop, replace = set(), {}
+    for i in np.nonzero(flat)[0]:
+        t = tris[i]
+        k = int(np.argmax(len2[i]))                    # arête la plus longue : de t[k] à t[k + 1], le milieu est t[k + 2]
+        u, v, m = t[k], t[(k + 1) % 3], t[(k + 2) % 3]
+        j = owner.get((v, u))
+        if j is None or flat[j] or j in replace or j in drop:
+            continue
+        a, b, c = tris[j]
+        s = [(a, b, c), (b, c, a), (c, a, b)][[(a, b), (b, c), (c, a)].index((v, u))]   # (v, u, w)
+        w = s[2]
+        drop.add(int(i))
+        replace[j] = [(v, m, w), (m, u, w)]
+    out = []
+    for idx, t in enumerate(tris):
+        if idx in drop:
+            continue
+        out.extend(replace[idx] if idx in replace else [t])
+    return out
+
+
+def build_outline_rim(loop_ij, Xmm, Ymm, z_top_mm, outline, base_mm, merge_tol_mm=1e-4):
+    """Généralisation de build_smooth_rim à un contour convexe exact quelconque (polygone régulier, éventuellement
+    à sommets arrondis : voir regular_polygon.py) au lieu du cercle. Même structure de retour :
+    (band_tris, wall_tris, bottom_band_tris).
+
+    ``outline`` fournit ``project(x, y)`` (projection sur le point du contour exact le plus proche : le contour est
+    convexe et contient l'origine) et ``points`` (N, 2) : ses sommets exacts (angles vifs ou points des arcs
+    d'arrondi), en mm comme Xmm/Ymm.
+
+    Comme pour le cercle, chaque point du contour en escalier est projeté sur le contour, à la même hauteur. Mais
+    contrairement au cercle, la projection doit être perpendiculaire et non radiale : le long d'un côté oblique, la
+    projection radiale n'est pas monotone (voir RegularPolygon.project) et la paroi repasserait sur ses pas. Et une
+    simple projection ne suffit pas pour un polygone : un angle vif tomberait entre deux points projetés (coin
+    coupé en biais) et un petit arc pourrait disparaître. Tous les sommets exacts du contour sont donc insérés dans
+    la chaîne projetée, à leur place angulaire (vue du centre, la chaîne projetée est monotone), avec une hauteur
+    interpolée entre les deux points projetés qui l'encadrent. Un sommet exact à moins de ``merge_tol_mm`` du
+    segment qui joint ses deux voisins projetés n'est pas inséré (évite des triangles quasi nuls ou alignés). Deux
+    nœuds voisins qui se projettent au même point sont fusionnés. Les triangles de la bande, de la paroi et de la
+    bande du fond sont découpés selon la
+    chaîne complète : un éventail issu du point b du contour en escalier relie b à chaque segment de la chaîne
+    entre les deux points projetés qui lui correspondent, sans jonction en T, donc étanche."""
+    loop_xyz = [(Xmm[j], Ymm[i], z_top_mm[i, j]) for i, j in loop_ij]
+    # sens horaire, comme build_smooth_rim (les triangles ci-dessous sont orientés vers l'extérieur dans ce sens)
+    area2 = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(loop_xyz, loop_xyz[1:] + loop_xyz[:1]))
+    if area2 > 0:
+        loop_xyz.reverse()
+    n = len(loop_xyz)
+    L = np.asarray(loop_xyz, dtype=np.float64)
+    px, py = outline.project(L[:, 0], L[:, 1])
+    P = np.stack([px, py, L[:, 2]], axis=1)
+    on_outline = np.hypot(px - L[:, 0], py - L[:, 1]) <= 1e-9     # nœud déjà sur le contour : pas de bruit flottant
+    P[on_outline, :2] = L[on_outline, :2]
+    # Deux nœuds voisins qui se projettent au même point (marche perpendiculaire au côté) mais à des hauteurs
+    # différentes donneraient une « ailette » verticale d'aire nulle dans la paroi : on leur donne la hauteur moyenne
+    # du groupe et des coordonnées strictement identiques ; la paroi n'a plus alors de triangle sans aire (retiré
+    # ensuite par drop_degenerate, comme pour le cercle).
+    same_next = np.hypot(P[:, 0] - np.roll(P[:, 0], -1), P[:, 1] - np.roll(P[:, 1], -1)) <= 1e-9
+    if same_next.any() and not same_next.all():
+        start = int(np.nonzero(~same_next)[0][0]) + 1               # premier indice qui ouvre un groupe
+        order = [(start + i) % n for i in range(n)]
+        i = 0
+        while i < n:
+            j = i
+            while j < n - 1 and same_next[order[j]]:
+                j += 1
+            if j > i:
+                idx = order[i:j + 1]
+                P[idx, 2] = P[idx, 2].mean()
+                P[idx, :2] = P[idx[0], :2]          # coordonnées strictement identiques (pas de quasi-doublon)
+            i = j + 1
+
+    # angle polaire cumulé (sens horaire) des points projetés, ramené à [0, 2 pi] : sert à placer les sommets exacts
+    two_pi = 2.0 * np.pi
+    psi = np.arctan2(P[:, 1], P[:, 0])
+    step = -((np.diff(np.concatenate([psi, psi[:1]])) + np.pi) % two_pi - np.pi)
+    step = np.maximum(step, 0.0)                      # une marche d'escalier qui « recule » n'avance pas
+    total = float(step.sum())
+    if total < 1e-9:
+        raise ValueError("contour exact : la boucle du masque ne fait pas le tour du centre de la forme.")
+    s = np.concatenate([[0.0], np.cumsum(step[:-1])]) * (two_pi / total)
+
+    E = np.asarray(outline.points, dtype=np.float64)
+    t_e = (psi[0] - np.arctan2(E[:, 1], E[:, 0])) % two_pi
+    gap = np.clip(np.searchsorted(s, t_e, side="right") - 1, 0, n - 1)
+    nxt = (gap + 1) % n
+    s_next = np.where(nxt == 0, two_pi, s[nxt])
+    span = s_next - s[gap]
+    frac = np.divide(t_e - s[gap], span, out=np.zeros_like(span), where=span > 0)
+    z_e = P[gap, 2] + (P[nxt, 2] - P[gap, 2]) * frac
+    # un sommet exact déjà sur le segment qui joint ses deux voisins projetés (à merge_tol_mm près) n'apporte rien :
+    # l'insérer créerait un triangle aligné d'aire nulle
+    A, B = P[gap, :2], P[nxt, :2]
+    AB = B - A
+    len2 = np.einsum("ij,ij->i", AB, AB)
+    tt = np.divide(np.einsum("ij,ij->i", E - A, AB), len2, out=np.zeros_like(len2), where=len2 > 0)
+    foot = A + np.clip(tt, 0.0, 1.0)[:, None] * AB
+    near = np.hypot(E[:, 0] - foot[:, 0], E[:, 1] - foot[:, 1]) <= merge_tol_mm
+    extra = {}
+    for idx in np.lexsort((t_e, gap)):
+        if not near[idx]:
+            extra.setdefault(int(gap[idx]), []).append((float(E[idx, 0]), float(E[idx, 1]), float(z_e[idx])))
+
+    zb = -base_mm
+    Lt = [tuple(row) for row in L.tolist()]
+    Pt = [tuple(row) for row in P.tolist()]
+    band_tris, wall_tris, bottom_band_tris = [], [], []
+    for k in range(n):
+        k2 = (k + 1) % n
+        a, b = Lt[k], Lt[k2]
+        chain = [Pt[k]] + extra.get(k, []) + [Pt[k2]]
+        a_base, b_base = (a[0], a[1], zb), (b[0], b[1], zb)
+        band_tris.append((a, b, chain[0]))
+        bottom_band_tris.append((b_base, a_base, (chain[0][0], chain[0][1], zb)))
+        for q0, q1 in zip(chain[:-1], chain[1:]):
+            q0_base, q1_base = (q0[0], q0[1], zb), (q1[0], q1[1], zb)
+            band_tris.append((b, q1, q0))
+            wall_tris.append((q0, q1, q0_base))
+            wall_tris.append((q1, q1_base, q0_base))
+            bottom_band_tris.append((q1_base, b_base, q0_base))
+
+    # un nœud qui se projette dans l'alignement du côté de l'escalier donne, au fond (plan z = -base), un triangle
+    # plat : on le remplace en scindant son voisin
+    return (split_collinear_slivers(band_tris), split_collinear_slivers(wall_tris),
+            split_collinear_slivers(bottom_band_tris))
+
+
 def erode3x3(m):
     """Érosion binaire 3x3 (tous les voisins doivent être True pour survivre)."""
     p = np.pad(m, 1, constant_values=False)
@@ -250,7 +399,7 @@ TOP_MODES = ("grid", "adaptive")
 def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_elev,
                             progress=None, smooth_wall=False, circle_radius_mm=None,
                             bottom="grid", bottom_max_cells=None, diagonal="fixed",
-                            top="grid", top_tol_mm=0.05):
+                            top="grid", top_tol_mm=0.05, outline=None):
     """Construit le maillage (triangles dessus/dessous/parois) à partir d'un
     tableau d'altitudes déjà découpé et d'un masque de cellules (quad_ok)
     déjà nettoyé. Ne touche jamais au disque ni à GDAL — testable avec de
@@ -278,7 +427,12 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
     top="grid" (défaut) : un ou deux triangles par cellule, exact aux nœuds.
     top="adaptive" (PROTOTYPE) : dessus en maillage RTIN à erreur bornée (voir adaptive_top.py) : bien moins de
     triangles, à ``top_tol_mm`` mm de tolérance verticale ; le bord du masque reste à pleine résolution, donc
-    les parois et le fond sont inchangés. Incompatible avec diagonal="adaptive" (sans objet)."""
+    les parois et le fond sont inchangés. Incompatible avec diagonal="adaptive" (sans objet).
+
+    outline (None par défaut) : contour exact convexe (polygone régulier, voir regular_polygon.py et
+    build_outline_rim), en mm. Même principe que smooth_wall, mais le contour en escalier est projeté sur ce
+    contour au lieu du cercle, et ses sommets exacts (angles, arcs d'arrondi) sont insérés dans la paroi. Implique
+    un bord lisse : smooth_wall et circle_radius_mm sont alors ignorés. Sans outline, rien ne change."""
     def _progress(i, n, label):
         if progress is not None:
             progress(i, n, label)
@@ -337,21 +491,29 @@ def build_mesh_from_arrays(elev, quad_ok, xs, ys, scale, vexag, base_mm, min_ele
     else:
         raise ValueError(f"bottom : valeur inconnue {bottom!r} (choix : {', '.join(BOTTOM_MODES)})")
 
-    if smooth_wall:
+    if smooth_wall or outline is not None:
         loop_ij = trace_boundary_loop(quad_ok)
         padded = np.pad(quad_ok, 1, constant_values=False)
         n_boundary = int(sum((quad_ok & ~padded[a, b]).sum() for a, b in (
             (slice(None, -2), slice(1, -1)), (slice(2, None), slice(1, -1)),
             (slice(1, -1), slice(None, -2)), (slice(1, -1), slice(2, None)))))
         if n_boundary != len(loop_ij):
+            if outline is not None:
+                sys.exit("Erreur : la forme (--sides) requiert un seul contour : le masque a un trou (zone sans "
+                         "donnée à l'intérieur de la forme) ou plusieurs parties. Relance avec --sea-level si le "
+                         "trou est de la mer, ou avec --fill-with-copernicus.")
             sys.exit("Erreur : --smooth-wall requiert un seul contour : le masque a un trou (zone sans donnée "
                      "à l'intérieur du disque) ou plusieurs parties. Relance sans --smooth-wall, ou avec "
                      "--sea-level si le trou est de la mer.")
-        if circle_radius_mm is None:
-            raise ValueError("smooth_wall=True nécessite circle_radius_mm (le vrai rayon, en mm).")
-        radius_mm = circle_radius_mm
-        band_tris, wall_tris, bottom_band_tris = build_smooth_rim(
-            loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm)
+        if outline is not None:
+            band_tris, wall_tris, bottom_band_tris = build_outline_rim(
+                loop_ij, Xmm, Ymm, z_top_mm, outline, base_mm)
+        else:
+            if circle_radius_mm is None:
+                raise ValueError("smooth_wall=True nécessite circle_radius_mm (le vrai rayon, en mm).")
+            radius_mm = circle_radius_mm
+            band_tris, wall_tris, bottom_band_tris = build_smooth_rim(
+                loop_ij, Xmm, Ymm, z_top_mm, radius_mm, base_mm)
         # un sommet du contour déjà exactement sur le cercle donne des triangles sans aire : on les retire
         extra_tris, _ = drop_degenerate(band_tris + bottom_band_tris)
         wall_tris, _ = drop_degenerate(wall_tris)

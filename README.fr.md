@@ -37,6 +37,8 @@ corrections et *pull requests* sont bienvenus.
 
 - Découpe circulaire d'un DEM autour d'un centre (X, Y) et d'un rayon,
   avec mise à l'échelle physique précise vers un diamètre imprimé cible.
+- Polygones réguliers (3 à 360 côtés) inscrits ou circonscrits à un cercle de référence, à angles vifs
+  ou arrondis par raccordements tangents exacts (`--sides`, voir plus bas).
 - Maillage garanti étanche (vérifié : chaque arête partagée par
   exactement 2 triangles) et normales cohérentes (volume signé positif).
 - Élimination automatique des parois trop fines pour l'impression FDM
@@ -152,7 +154,7 @@ python circle_dem_to_stl.py \
 | `--output` | Fichier STL de sortie | requis |
 | `--cx`, `--cy` | Centre du cercle, dans le CRS du fichier source | voir `--lat`/`--lon` |
 | `--lat`, `--lon` | Centre du cercle en WGS84 — alternative à `--cx`/`--cy` | voir `--cx`/`--cy` |
-| `--radius` | Rayon du cercle, en mètres | requis |
+| `--radius` | Rayon du cercle (de référence avec `--sides`), en mètres | requis |
 | `--diameter-mm` | Diamètre final imprimé, en mm | demandé si omis (250) |
 | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
 | `--vexag` | Exagération verticale | demandée si omise (1.0) |
@@ -163,6 +165,12 @@ python circle_dem_to_stl.py \
 | `--diagonal` | Diagonale de coupe des cellules du dessus : `fixed`, `adaptive` (prototype) | `fixed` |
 | `--bottom` | Triangulation du fond plat : `grid`, `merged` (prototype), `merged-rows` (comparaison) | `grid` |
 | `--bottom-max-cells` | Avec `merged-rows` : côté maximal d'un rectangle, en cellules (0 = sans limite) | 0 |
+| `--sides` | Polygone régulier à N côtés (3-360) au lieu du disque (voir ci-dessous) | désactivé |
+| `--circle-mode` | Avec `--sides` : `inscribed` (sommets sur le cercle de référence) ou `circumscribed` (côtés tangents) | requis avec `--sides` |
+| `--corner-radius` | Avec `--sides` : rayon d'arrondi des sommets, en mm imprimés | 0 (angles vifs) |
+| `--rotation` | Avec `--sides` : rotation en degrés, sens antihoraire | 0 |
+| `--corner-tol-mm` | Avec `--sides` et `--corner-radius` : flèche maximale des arcs, en mm imprimés | 0.005 |
+| `--corner-segments` | Avec `--sides` et `--corner-radius` : nombre de segments par arc (remplace `--corner-tol-mm`) | calculé |
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
@@ -178,6 +186,7 @@ Fournis soit `--cx`/`--cy`, soit `--lat`/`--lon` — pas les deux.
 circle_dem_to_stl.py   # argparse, prompts interactifs, orchestration
 raster.py              # GDAL : ouverture, détection/reprojection CRS, ré-échantillonnage
 mesh.py                # numpy/scipy pur : nettoyage du masque, construction du maillage
+regular_polygon.py     # numpy pur : polygones réguliers (--sides), appartenance exacte, projection, arcs
 stl_io.py              # écriture STL binaire
 download.py            # téléchargement Copernicus DEM (compartiment S3 public)
 tests/
@@ -332,6 +341,37 @@ si ce décalage dépasse 50 m. Limites : Copernicus est un modèle de surface (a
 bâtiments) à 30 m alors que les données nationales sont en général du sol nu, donc
 le raccord montre un changement de résolution et de nature ; le log indique la part
 du disque comblée.
+
+### Polygones réguliers (`--sides`)
+
+À la place du disque, un polygone régulier à N côtés (3 à 360) associé à un **cercle de référence**, avec
+sommets éventuellement arrondis :
+
+```
+python circle_dem_to_stl.py --input mnt.tif --cx 2601000 --cy 1201000 --radius 300 --diameter-mm 60 \
+    --base-mm 3 --sides 6 --circle-mode circumscribed --corner-radius 2 --output hexagone.stl
+```
+
+* Le cercle de référence est celui de `--radius` (mètres de terrain) et de `--diameter-mm` (son diamètre
+  imprimé) : même échelle qu'un disque. `--circle-mode` est obligatoire : `inscribed` (les sommets sont sur le
+  cercle) ou `circumscribed` (les côtés sont tangents au cercle). En mode circonscrit la pièce **dépasse**
+  `--diameter-mm` (jusqu'à un facteur 1/cos(π/N) sur les sommets) : le journal et `--dry-run` affichent les
+  dimensions réellement imprimées (`pièce : L x l mm`).
+* `--corner-radius R` arrondit les sommets par des arcs de cercle tangents aux côtés, `R` en **mm imprimés**
+  (0 ou omis : angles vifs). Maximum : l'apothème de la pièce ; à cette valeur le contour devient un cercle.
+  Le cercle de référence décrit toujours le polygone à angles vifs, même arrondi : la pièce arrondie est donc
+  un peu plus petite aux sommets (rayon extrême du contour : (a − R)/cos(π/N) + R, affiché dans le journal).
+* Orientation par défaut : un sommet au nord pour N impair, un côté au nord pour N pair. `--rotation` la fait
+  tourner de ce nombre de degrés, dans le sens antihoraire.
+* Le bord est **exact** : côtés droits (pas d'escalier), sommets et points de tangence sur le contour théorique,
+  paroi verticale. Les arcs sont découpés pour que l'écart corde-arc ne dépasse pas `--corner-tol-mm` (défaut
+  0,005 mm imprimé ; les sommets sont sur l'arc, les cordes à l'intérieur) ou en `--corner-segments` segments
+  par arc si tu préfères imposer ce nombre. Le journal indique le nombre de segments et la flèche obtenue.
+* Incompatible avec `--polygon`, `--clip-to-place` et `--smooth-wall`. Comme `--smooth-wall`, le masque doit
+  être d'un seul tenant, sans trou : utilise `--sea-level` ou `--fill-with-copernicus` pour les zones sans donnée.
+  Les données téléchargées (`--source`, `--download-copernicus`) couvrent le disque qui enveloppe toute la pièce.
+* `check_stl.py` accepte les mêmes `--sides`, `--circle-mode`, `--corner-radius` (mm) et `--rotation` pour
+  contrôler l'encombrement exact de la pièce.
 
 ### Découpe par polygone (`--polygon`)
 
