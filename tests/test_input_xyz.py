@@ -120,3 +120,18 @@ def test_scattered_xyz_points_are_refused(tmp_path):
     with pytest.raises(raster.InputError, match="Ungridded|illisible|grille"):
         names = prepared(str(path), source_crs="EPSG:2056")[1]
         run(names)
+
+
+def test_survey_style_xyz_with_header_and_extra_columns_is_refused(tmp_path):
+    """Mise en page des sondages bathymétriques NOAA (« survey_id,lat,long,depth,quality_code,active ») : une ligne
+    d'en-tête, une colonne texte et des colonnes en plus, des points dispersés. Ce n'est pas une grille XYZ : refusé."""
+    rng = np.random.default_rng(5)
+    lat = 47.60 + rng.uniform(0, 0.05, 500)
+    lon = -122.28 + rng.uniform(0, 0.06, 500)
+    lines = ["survey_id,lat,long,depth,quality_code,active"]
+    lines += [f"H11292,{a:.8f},{b:.8f},{rng.uniform(1, 60):.2f},1,1" for a, b in zip(lat, lon)]
+    path = tmp_path / "H11292.xyz"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(raster.InputError, match="illisible|not recognized|Ungridded"):
+        names = prepared(str(path), source_crs="EPSG:4326")[1]
+        run(names)
