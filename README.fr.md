@@ -269,8 +269,9 @@ ceux qui ont réellement été testés.
 | NetCDF | `.nc` | **avec sélection** | Axes spatiaux réguliers (lat/lon ou x/y) requis. Plusieurs variables → `--layer NOM`, sauf si une seule se déclare altitude. Dimensions supplémentaires (temps, niveau) → `--band N`. |
 | HDF5 | `.h5` `.hdf5` | **partiel** | Seulement le HDF5 qui suit le modèle NetCDF-4/CF avec axes spatiaux (lu comme un NetCDF). Un HDF5 générique (datasets bruts) est **signalé comme non pris en charge**, avec la liste de ses datasets. |
 | LAS, LAZ | `.las` `.laz` | **pris en charge, chaîne propre** | Requiert `laspy` (+`lazrs` pour les `.laz`). Classe sol 2 par défaut ; un nuage non classifié exige un `--lidar-select` explicite. Voir [Nuages de points](#nuages-de-points-lasllaz). |
+| XYZ texte, **grille régulière** | `.xyz` | **pris en charge** (GDAL « ASCII Gridded XYZ ») | Une ligne `x y z` par cellule d'une grille régulière, lignes dans l'un ou l'autre sens ; un point ou une ligne absent est du NoData (jamais zéro ; une altitude réelle de 0,000 m reste une valeur). Le fichier ne porte pas de CRS : `--source-crs` est obligatoire. Une liste de points dispersés n'est **pas** une grille et est refusée (« Ungridded dataset »). |
 | Tout autre raster ouvert par GDAL | | lu via GDAL (pas testé spécifiquement) | Mêmes règles de bandes, CRS, unités et NoData. |
-| **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY/XYZ, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
+| **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY, listes de points XYZ dispersés, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
 
 ### Règles communes à tous les formats
 
