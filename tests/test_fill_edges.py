@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Comblement des cellules sans donnée : seuls les TROUS sont interpolés. Hors de l'emprise du fichier et autour
 d'une grande zone vide (mer laissée sans donnée), gdal.FillNodata prolongerait le relief sur 50 pixels : ce relief
-n'existe pas dans la source, il n'est plus créé (sauf --extrapolate-edges). Aucun réseau."""
+n'existe pas dans la source, il n'est pas créé sous --fill-holes-only (par défaut, il l'est, comme avant). Aucun réseau."""
 import json
 import sys
 from pathlib import Path
@@ -82,19 +82,19 @@ def east_edge(tmp_path):
 def test_nothing_is_invented_beyond_the_file_footprint(east_edge):
     path, cx, cy = east_edge
     stats = {}
-    elev, xs, ys, nodata = warp(path, cx, cy, 500.0, stats=stats)
+    elev, xs, ys, nodata = warp(path, cx, cy, 500.0, extrapolate_edges=False, stats=stats)
     assert elev.shape == (200, 200)
     assert (elev[:, :100] != nodata).all() and (elev[:, 100:] == nodata).all()
-    # ...mais l'ancien comblement aurait prolongé le relief : la zone est signalée dans stats
+    # ...alors que le comblement par défaut aurait prolongé le relief : la zone est signalée dans stats
     edge = stats["edge_cells"]
     assert edge[:, 100:140].all() and not edge[:, :100].any() and not edge[:, 160:].any()
 
 
-def test_extrapolate_edges_restores_the_old_fill_and_reports_it(east_edge):
+def test_the_default_is_the_former_fill_and_reports_it(east_edge):
     path, cx, cy = east_edge
     stats, strict_stats = {}, {}
-    elev, _, _, nodata = warp(path, cx, cy, 500.0, extrapolate_edges=True, stats=stats)
-    warp(path, cx, cy, 500.0, stats=strict_stats)
+    elev, _, _, nodata = warp(path, cx, cy, 500.0, stats=stats)                       # défaut : comme avant
+    warp(path, cx, cy, 500.0, extrapolate_edges=False, stats=strict_stats)
     assert (elev[:, 100:140] != nodata).all() and (elev[:, 160:] == nodata).all()
     assert np.array_equal(stats["edge_cells"], strict_stats["edge_cells"])      # même zone, remplie ou non
     assert stats["edge_cells"].sum() == (elev[:, 100:] != nodata).sum()
@@ -102,36 +102,40 @@ def test_extrapolate_edges_restores_the_old_fill_and_reports_it(east_edge):
     assert abs(elev[100, 110] - elev[100, 99]) < 5.0
 
 
-def test_a_small_hole_inside_the_data_is_still_filled(tmp_path):
+def test_a_small_hole_inside_the_data_is_filled_in_both_modes(tmp_path):
     z = plane(200, 200)
     z[90:96, 90:96] = NODATA
     write_synthetic_tif(tmp_path / "h.tif", z, X0, Y0, 5.0, 2056)
-    stats = {}
-    elev, _, _, nodata = warp(tmp_path / "h.tif", X0 + 500.0, Y0 - 500.0, 500.0, stats=stats)
-    assert (elev != nodata).all()
-    assert abs(elev[92, 92] - plane(200, 200)[92, 92]) < 1.0      # raccordé aux données voisines
-    assert not stats["edge_cells"].any()
+    for extrapolate in (True, False):
+        stats = {}
+        elev, _, _, nodata = warp(tmp_path / "h.tif", X0 + 500.0, Y0 - 500.0, 500.0, extrapolate_edges=extrapolate,
+                                  stats=stats)
+        assert (elev != nodata).all()
+        assert abs(elev[92, 92] - plane(200, 200)[92, 92]) < 1.0      # raccordé aux données voisines
+        assert not stats["edge_cells"].any()
 
 
-def test_a_narrow_gap_crossing_the_window_is_still_filled(tmp_path):
+def test_a_narrow_gap_crossing_the_window_is_filled_in_both_modes(tmp_path):
     z = plane(200, 200)
     z[:, 90:97] = NODATA                  # rivière sans donnée de 35 m, d'un bord de la fenêtre à l'autre
     write_synthetic_tif(tmp_path / "r.tif", z, X0, Y0, 5.0, 2056)
-    stats = {}
-    elev, _, _, nodata = warp(tmp_path / "r.tif", X0 + 500.0, Y0 - 500.0, 500.0, stats=stats)
-    assert (elev != nodata).all()
-    assert not stats["edge_cells"].any()
+    for extrapolate in (True, False):
+        stats = {}
+        elev, _, _, nodata = warp(tmp_path / "r.tif", X0 + 500.0, Y0 - 500.0, 500.0, extrapolate_edges=extrapolate,
+                                  stats=stats)
+        assert (elev != nodata).all()
+        assert not stats["edge_cells"].any()
 
 
-def test_a_large_empty_zone_inside_the_file_is_left_out(tmp_path):
+def test_a_large_empty_zone_inside_the_file_is_left_out_with_fill_holes_only(tmp_path):
     z = plane(400, 400)
     z[135:265, 135:265] = NODATA          # « mer » de 130 pixels de côté : son centre est à 65 pixels d'une donnée
     write_synthetic_tif(tmp_path / "s.tif", z, X0, Y0, 5.0, 2056)
     stats = {}
-    elev, _, _, nodata = warp(tmp_path / "s.tif", X0 + 1000.0, Y0 - 1000.0, 1000.0, stats=stats)
+    elev, _, _, nodata = warp(tmp_path / "s.tif", X0 + 1000.0, Y0 - 1000.0, 1000.0, extrapolate_edges=False, stats=stats)
     assert (elev[135:265, 135:265] == nodata).all()
-    assert stats["edge_cells"].sum() > 0              # l'ancien comblement en aurait rempli l'anneau extérieur
-    legacy, _, _, _ = warp(tmp_path / "s.tif", X0 + 1000.0, Y0 - 1000.0, 1000.0, extrapolate_edges=True)
+    assert stats["edge_cells"].sum() > 0              # le comblement par défaut en aurait rempli l'anneau extérieur
+    legacy, _, _, _ = warp(tmp_path / "s.tif", X0 + 1000.0, Y0 - 1000.0, 1000.0)
     assert (legacy[135:265, 135:265] != nodata).sum() == stats["edge_cells"].sum()
 
 
@@ -166,15 +170,14 @@ def cliff_coast(tmp_path):
     return tmp_path / "coast.tif"
 
 
-def test_cli_sea_level_coast_has_no_extrapolated_plateau(monkeypatch, tmp_path, capsys, cliff_coast):
-    stl, out = cli(monkeypatch, tmp_path, capsys, cliff_coast, "--sea-level", "0", "--report")
-    stl2, out2 = cli(monkeypatch, tmp_path, capsys, cliff_coast, "--sea-level", "0", "--extrapolate-edges",
-                     "--report", name="legacy.stl")
+def test_cli_fill_holes_only_leaves_no_extrapolated_plateau_on_a_cliff_coast(monkeypatch, tmp_path, capsys, cliff_coast):
+    stl, out = cli(monkeypatch, tmp_path, capsys, cliff_coast, "--sea-level", "0", "--fill-holes-only", "--report")
+    stl2, out2 = cli(monkeypatch, tmp_path, capsys, cliff_coast, "--sea-level", "0", "--report", name="legacy.stl")
     strict, legacy = check_stl.read_stl(str(stl)), check_stl.read_stl(str(stl2))
-    # sans l'option, la mer reste à plat jusqu'à la côte ; avec, un plateau de 30 m s'avance dans l'eau
+    # avec --fill-holes-only, la mer reste à plat jusqu'à la côte ; par défaut, un plateau de 30 m s'avance dans l'eau
     assert check_stl.signed_volume(legacy) > 1.1 * check_stl.signed_volume(strict)
-    assert "laissées sans donnée plutôt que prolongées" in out and "EXTRAPOLÉE" not in out
-    assert "EXTRAPOLÉE(S) au-delà des données" in out2 and "ATTENTION" in out2
+    assert "laissées sans donnée (--fill-holes-only) plutôt que prolongées" in out and "EXTRAPOLÉE" not in out
+    assert "EXTRAPOLÉE(S) au-delà des données" in out2 and "ATTENTION" in out2 and "--fill-holes-only" in out2
     rep = json.loads((tmp_path / "output" / "m.json").read_text(encoding="utf-8"))
     rep2 = json.loads((tmp_path / "output" / "legacy.json").read_text(encoding="utf-8"))
     nd, nd2 = rep["source"]["no_data"], rep2["source"]["no_data"]
@@ -204,17 +207,19 @@ def short_dem(tmp_path):
     return tmp_path / "short.tif"
 
 
-def test_regular_polygon_refused_by_default_and_message_names_the_option(monkeypatch, tmp_path, capsys, short_dem):
+def test_regular_polygon_refused_with_fill_holes_only_and_message_names_the_option(monkeypatch, tmp_path, capsys,
+                                                                                    short_dem):
     with pytest.raises(SystemExit) as e:
-        cli(monkeypatch, tmp_path, capsys, short_dem, "--sides", "6", "--circle-mode", "inscribed")
+        cli(monkeypatch, tmp_path, capsys, short_dem, "--sides", "6", "--circle-mode", "inscribed",
+            "--fill-holes-only")
     msg = str(e.value)
     assert "n'ont pas de donnée valide" in msg and "--sea-level" in msg and "mm imprimés de son bord" in msg
-    assert "--extrapolate-edges" in msg
+    assert "sans --fill-holes-only" in msg
 
 
-def test_regular_polygon_accepted_with_extrapolate_edges(monkeypatch, tmp_path, capsys, short_dem):
-    stl, out = cli(monkeypatch, tmp_path, capsys, short_dem, "--sides", "6", "--circle-mode", "inscribed",
-                   "--extrapolate-edges")
+def test_regular_polygon_accepted_by_default_when_the_overshoot_is_within_50_pixels(monkeypatch, tmp_path, capsys,
+                                                                                    short_dem):
+    stl, out = cli(monkeypatch, tmp_path, capsys, short_dem, "--sides", "6", "--circle-mode", "inscribed")
     tris = check_stl.read_stl(str(stl))
     assert check_stl.signed_volume(tris) > 0
     assert "EXTRAPOLÉE(S) au-delà des données" in out

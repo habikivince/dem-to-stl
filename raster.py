@@ -314,7 +314,7 @@ def _working_type(gdal_type):
 
 
 def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_cb=None, fill=True,
-                inside_fn=None, resample="auto", extrapolate_edges=False, stats=None):
+                inside_fn=None, resample="auto", extrapolate_edges=True, stats=None):
     """Ré-échantillonne une fenêtre carrée de 2*radius de côté autour de
     (cx, cy), dans dst_srs_wkt, à pixel_size_m/pixel. Reprojette à la
     volée si dst_srs_wkt diffère du CRS de la source — gdal.Warp gère
@@ -334,13 +334,13 @@ def warp_window(input_path, dst_srs_wkt, cx, cy, radius, pixel_size_m, progress_
     entière est ré-échantillonnée en virgule flottante (pas d'arrondi des moyennes). Un nuage de points
     (lidar.LidarInput) n'est pas ré-échantillonné : il est rastérisé directement sur cette grille.
 
-    Comblement (fill=True) : seuls les TROUS (closed_gaps : entourés de données, à FILL_MAX_DISTANCE_PX pixels au
-    plus d'une donnée) sont interpolés. Les cellules sans donnée hors de l'emprise de la source ou dans une zone
-    vide plus grande restent sans donnée : le relief n'y est pas inventé. extrapolate_edges=True rétablit
-    l'ancien comportement (interpolation sur FILL_MAX_DISTANCE_PX pixels autour de toute donnée, donc
-    extrapolation au bord de la source). stats (dict, facultatif) reçoit "edge_cells" : masque des cellules
-    qu'une interpolation sur FILL_MAX_DISTANCE_PX pixels remplirait sans qu'elles soient dans un trou (remplies si
-    extrapolate_edges, laissées sans donnée sinon)."""
+    Comblement (fill=True) : par défaut (extrapolate_edges=True), interpolation sur FILL_MAX_DISTANCE_PX pixels
+    autour de toute donnée, donc aussi extrapolation au bord de la source. extrapolate_edges=False
+    (--fill-holes-only) : seuls les TROUS (closed_gaps : entourés de données, à FILL_MAX_DISTANCE_PX pixels au plus
+    d'une donnée) sont interpolés ; les cellules sans donnée hors de l'emprise de la source ou dans une zone vide
+    plus grande restent sans donnée : le relief n'y est pas inventé. stats (dict, facultatif) reçoit "edge_cells" :
+    masque des cellules qu'une interpolation sur FILL_MAX_DISTANCE_PX pixels remplirait sans qu'elles soient dans un
+    trou (remplies si extrapolate_edges, laissées sans donnée sinon)."""
     if resample not in RESAMPLE_CHOICES:
         raise InputError(f"--resample : valeur inconnue {resample!r} (choix : {', '.join(RESAMPLE_CHOICES)})")
     primary = _primary(input_path)

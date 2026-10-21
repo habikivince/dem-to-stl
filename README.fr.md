@@ -235,7 +235,7 @@ python circle_dem_to_stl.py \
 | `--sea-level` | Active le mode île à cette altitude (m) | désactivé |
 | `--min-elevation` | Seuil d'exclusion des gouffres d'interpolation, en m | -50 |
 | `--land-threshold` | Seuil terre/bruit d'eau au-dessus de `--sea-level`, en m | 1.0 |
-| `--extrapolate-edges` | Prolonge le relief sur 50 pixels de travail au plus au-delà des données (ancien comblement) ; les cellules inventées sont journalisées | désactivé |
+| `--fill-holes-only` | Ne comble que les trous ; au-delà des données, la pièce est coupée au lieu d'être prolongée (aucun relief inventé) | désactivé (le relief est prolongé sur 50 pixels de travail au plus au-delà des données, et journalisé) |
 | `--download-copernicus` | Télécharge les tuiles Copernicus DEM nécessaires au lieu de fournir `--input` | désactivé |
 | `--copernicus-product` | Résolution Copernicus à télécharger : `30` (GLO-30) ou `90` (GLO-90) | 30 |
 | `--cache-dir` | Dossier de cache des tuiles Copernicus téléchargées | `./copernicus_cache` |
@@ -560,26 +560,27 @@ une grille quasi identique.
 
 ### Trous et bord des données
 
-Les cellules de la zone sans donnée sont traitées de deux façons :
+Les cellules de la zone sans donnée sont comblées par interpolation pondérée par l'inverse de la
+distance (`gdal.FillNodata`), à 50 pixels de travail au plus d'une donnée. Cela recouvre deux cas
+différents :
 
-* **Les trous** (vides, bande manquante entre deux dalles, rivière laissée vide par la source) sont
-  comblés par interpolation pondérée par l'inverse de la distance (`gdal.FillNodata`), à condition
-  d'être entourés de données ou de traverser la fenêtre de part en part, et qu'aucune cellule ne soit
-  à plus de 50 pixels de travail d'une donnée. Le nombre de cellules comblées est journalisé.
-* **Tout le reste** reste vide : la zone au-delà du bord du fichier, la mer d'une source qui la laisse
-  sans donnée, une grande zone manquante. Un disque coupé par le bord du
-  fichier est donc tronqué au lieu d'être complété, ce que `--preview` montre ; avec `--sea-level`,
-  ces cellules deviennent de la mer. Le journal compte les cellules de la zone que l'ancien comblement
-  aurait prolongées depuis le bord des données.
+* **Les trous** (vides, bande manquante entre deux dalles, rivière laissée vide par la source) :
+  entourés de données, ou qui traversent la fenêtre de part en part. Les combler ne fait que raccorder
+  les données qui les entourent. Le nombre de cellules comblées est journalisé.
+* **Les bords** : la zone au-delà du bord du fichier, la mer d'une source qui la laisse sans donnée, le
+  pourtour d'une grande zone manquante. Les combler *prolonge* le relief depuis le bord des données, ce
+  qui est du relief inventé : avec `--print-spacing-mm 0.2` (valeur par défaut), jusqu'à 10 mm sur la
+  pièce imprimée, quel que soit le rayon, et sur une côte à falaise un plateau à la hauteur de la
+  falaise avance dans la mer. Le journal avertit (`ATTENTION … EXTRAPOLÉE(S)`) et compte ces cellules ;
+  le JSON de `--report` les compte dans `source.no_data`.
 
-L'ancien comblement prolongeait le relief sur 50 pixels de travail au-delà des données. Avec
-`--print-spacing-mm 0.2` (valeur par défaut), cela fait 10 mm sur la pièce imprimée, quel que soit le
-rayon, et c'était du relief inventé : sur une côte à falaise, par exemple, un plateau à la hauteur de la
-falaise avançait dans la mer. `--extrapolate-edges` le rétablit (le journal indique alors combien de
-cellules ont été extrapolées). Avec `--sides`, une forme qui dépasse les données est refusée, comme
-avant ; `--extrapolate-edges` l'accepte quand le dépassement tient dans 50 pixels. L'option est sans
-effet sur une entrée LAS/LAZ, qui ne s'étend jamais au-delà des points (voir `--lidar-interp`). Le JSON
-de `--report` compte ces cellules dans `source.no_data`.
+`--fill-holes-only` ne comble que les trous. Les bords restent vides : un disque coupé par le bord du
+fichier est tronqué au lieu d'être complété, ce que `--preview` montre, et avec `--sea-level` ces
+cellules deviennent de la mer. Avec `--sides`, une forme qui dépasse les données est alors refusée, et
+le message nomme l'option ; par défaut, elle est acceptée quand le dépassement tient dans 50 pixels.
+Quand toutes les cellules du disque ont une donnée, ou un trou autour d'elles, les deux modes donnent
+le même STL. L'option est sans effet sur une entrée LAS/LAZ, qui ne s'étend jamais au-delà des points
+(voir `--lidar-interp`).
 
 ### Combler les trous avec Copernicus (`--fill-with-copernicus`)
 
@@ -819,13 +820,12 @@ cohérence des normales, et le comportement attendu de chaque option.
 
 ## Historique des changements notables
 
-- **Plus de relief au-delà des données. Changement de comportement** : `gdal.FillNodata` prolongeait le
-  relief sur 50 pixels de travail au-delà des données (10 mm sur la pièce imprimée avec le
-  `--print-spacing-mm` par défaut), hors de l'emprise du fichier et autour d'une grande zone vide (une mer
-  laissée sans donnée). Seuls les trous sont désormais comblés ; `--extrapolate-edges` rétablit l'ancien
-  comportement, et le journal comme le JSON de `--report` comptent les cellules concernées
-  (`tests/test_fill_edges.py`). Un disque coupé par le bord du fichier est tronqué, et une forme `--sides`
-  qui dépasse les données est refusée sans `--extrapolate-edges`.
+- **`--fill-holes-only`** (facultatif, défaut inchangé) : `gdal.FillNodata` prolonge le relief sur 50
+  pixels de travail au-delà des données (10 mm sur la pièce imprimée avec le `--print-spacing-mm` par
+  défaut), hors de l'emprise du fichier et autour d'une grande zone vide (une mer laissée sans donnée).
+  Le journal et le JSON de `--report` comptent ces cellules. Avec l'option, seuls les trous sont
+  comblés : un disque coupé par le bord du fichier est tronqué, et une forme `--sides` qui dépasse les
+  données est refusée (`tests/test_fill_edges.py`).
 - **`--preview`** : aperçu ombré PNG de la zone découpée, écrit avant le maillage
   (`tests/test_preview.py`, `tests/test_preview_cli.py`).
 - **`check_stl.py` : coques, caractéristique d'Euler et triangles retournés** (`--expect-shells`,

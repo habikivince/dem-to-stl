@@ -230,7 +230,7 @@ sets the base at sea level, but keeps only the largest land component and flatte
 | `--sea-level` | Enables island mode at this elevation (m) | disabled |
 | `--min-elevation` | Threshold for excluding interpolation artifacts, in m | -50 |
 | `--land-threshold` | Land/water-noise threshold above `--sea-level`, in m | 1.0 |
-| `--extrapolate-edges` | Extends the relief by up to 50 working pixels beyond the data (former gap filling); invented cells are logged | disabled |
+| `--fill-holes-only` | Fills only the holes; beyond the data the piece is cut instead of extended (no invented relief) | disabled (the relief is extended up to 50 working pixels beyond the data, and logged) |
 | `--download-copernicus` | Downloads the needed Copernicus DEM tiles instead of providing `--input` | disabled |
 | `--copernicus-product` | Copernicus resolution to download: `30` (GLO-30) or `90` (GLO-90) | 30 |
 | `--cache-dir` | Cache folder for downloaded Copernicus tiles | `./copernicus_cache` |
@@ -547,26 +547,25 @@ cached files are much lighter than full-resolution downloads. Averaging 0.5 m or
 
 ### Gaps and the edge of the data
 
-Cells of the area without data are treated in two ways:
+Cells of the area without data are filled by inverse-distance interpolation (`gdal.FillNodata`), up
+to 50 working pixels from valid data. That covers two different cases:
 
-* **Holes** (voids, a missing strip between two tiles, a river left empty by the source):
-  filled by inverse-distance interpolation (`gdal.FillNodata`), as long as they are
-  surrounded by data or cross the window from side to side, and no cell is more than 50
-  working pixels from valid data. The number of filled cells is logged.
-* **Everything else** stays empty: the area beyond the edge of the file, the sea of a source
-  that leaves it as NoData, a large missing zone. A disc cut by
-  the edge of the file is therefore truncated instead of completed, which `--preview` shows;
-  with `--sea-level` these cells become sea. The log counts the cells of the area that the
-  former filling would have extended from the edge of the data.
+* **Holes** (voids, a missing strip between two tiles, a river left empty by the source): surrounded
+  by data, or crossing the window from side to side. Filling them only joins the data around them.
+  The number of filled cells is logged.
+* **Edges**: the area beyond the edge of the file, the sea of a source that leaves it as NoData, the
+  rim of a large missing zone. Filling them *extends* the relief from the edge of the data, which
+  makes it invented relief: at the default `--print-spacing-mm 0.2` that is up to 10 mm on the
+  printed part, whatever the radius, and on a cliff coast a plateau at the height of the cliff
+  advances into the sea. The log warns (`ATTENTION … EXTRAPOLÉE(S)`) and counts these cells; the
+  `--report` JSON counts them in `source.no_data`.
 
-The former filling extended the relief up to 50 working pixels beyond the data. At the
-default `--print-spacing-mm 0.2` that is 10 mm on the printed part, whatever the radius, and
-it was invented relief: on a cliff coast, for instance, a plateau at the height of the cliff
-advanced into the sea. `--extrapolate-edges` brings it back (the log then says how many cells
-were extrapolated). With `--sides`, a shape that overshoots the data is refused, as before;
-`--extrapolate-edges` accepts it when the overshoot is within 50 pixels. The option has no
-effect on LAS/LAZ input, which never extends beyond the points (see `--lidar-interp`).
-The `--report` JSON counts these cells in `source.no_data`.
+`--fill-holes-only` fills only the holes. The edges stay empty: a disc cut by the edge of the file is
+truncated instead of completed, which `--preview` shows, and with `--sea-level` these cells become
+sea. With `--sides`, a shape that overshoots the data is then refused, and the message names the
+option; by default it is accepted when the overshoot is within 50 pixels. When every cell of the
+disc has data, or has a hole around it, both modes give the same STL. The option has no effect on
+LAS/LAZ input, which never extends beyond the points (see `--lidar-interp`).
 
 ### Filling gaps with Copernicus (`--fill-with-copernicus`)
 
@@ -797,12 +796,12 @@ consistency, and the expected behavior of each option.
  
 ## Notable changes
  
-- **No relief beyond the data. Behaviour change**: `gdal.FillNodata` used to extend the relief up to 50
-  working pixels beyond the data (10 mm on the printed part at the default `--print-spacing-mm`), outside
-  the file's footprint and around a large empty zone (a sea left as NoData). Only holes are filled now;
-  `--extrapolate-edges` brings the former behaviour back, and the log and the `--report` JSON count the
-  cells concerned (`tests/test_fill_edges.py`). A disc cut by the edge of the file is truncated, and a
-  `--sides` shape that overshoots the data is refused unless `--extrapolate-edges` is given.
+- **`--fill-holes-only`** (opt-in, default unchanged): `gdal.FillNodata` extends the relief up to 50
+  working pixels beyond the data (10 mm on the printed part at the default `--print-spacing-mm`),
+  outside the file's footprint and around a large empty zone (a sea left as NoData). The log and the
+  `--report` JSON count these cells. With the option, only holes are filled: a disc cut by the edge of
+  the file is truncated, and a `--sides` shape that overshoots the data is refused
+  (`tests/test_fill_edges.py`).
 - **`--preview`**: shaded PNG preview of the cut area, written before meshing
   (`tests/test_preview.py`, `tests/test_preview_cli.py`).
 - **`check_stl.py`: shells, Euler characteristic and inverted triangles** (`--expect-shells`,
