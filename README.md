@@ -223,6 +223,7 @@ sets the base at sea level, but keeps only the largest land component and flatte
 | `--sides` | Regular N-gon (3-360) instead of the disc (see below) | disabled |
 | `--circle-mode` | With `--sides`: `inscribed` (vertices on the reference circle) or `circumscribed` (sides tangent) | required with `--sides` |
 | `--corner-radius` | With `--sides`: corner rounding radius, in printed mm | 0 (sharp) |
+| `--ref-outline` | With `--sides`, `--circle-mode inscribed` and `--corner-radius`: what the reference circle describes, `sharp` (the polygon before rounding) or `rounded` (tangent to the rounded corners) | `sharp` |
 | `--rotation` | With `--sides`: rotation in degrees, counter-clockwise | 0 |
 | `--corner-tol-mm` | With `--sides` and `--corner-radius`: maximum arc sagitta, in printed mm | 0.005 |
 | `--corner-segments` | With `--sides` and `--corner-radius`: segments per arc (replaces `--corner-tol-mm`) | computed |
@@ -596,8 +597,18 @@ python circle_dem_to_stl.py --input dem.tif --cx 2601000 --cy 1201000 --radius 3
   1/cos(π/N) at the vertices): the log and `--dry-run` print the real printed size (`pièce : W x H mm`).
 * `--corner-radius R` rounds the corners with circular arcs tangent to the sides, `R` in **printed mm** (0 or
   omitted: sharp corners). Maximum: the apothem of the part; at that value the outline becomes a circle.
-  The reference circle always describes the sharp polygon, even when rounded, so a rounded part is slightly
-  smaller at the corners (extreme radius of the outline: (a − R)/cos(π/N) + R, printed in the log).
+* With rounded corners in `inscribed` mode, `--ref-outline` chooses **what the reference circle describes**:
+  * `sharp` (default): the polygon *before* rounding. Its vertices lie on the circle, then the rounding cuts
+    them back, so the rounded part sits slightly inside the circle and no longer touches it (extreme radius
+    of the outline: (a − R)/cos(π/N) + R = ref − R·(1/cos(π/N) − 1), printed in the log).
+  * `rounded`: the **rounded outline**. The reference circle is tangent to the circle of every corner
+    rounding: it touches the top of each arc and never exceeds it, so the part fits in `--diameter-mm`
+    exactly. The underlying sharp polygon is then larger (its vertices lie beyond the circle). The centres of
+    the roundings are at (reference radius − R) from the centre; the maximum `--corner-radius` becomes the
+    reference radius (the outline is then the reference circle itself). File names get the suffix
+    `_cercle-tangent`, so the two readings never overwrite each other.
+  In `circumscribed` mode nothing changes between the two: rounding does not move the sides, which stay
+  tangent to the circle (the option is accepted and the log says it has no effect).
 * Default orientation: a vertex pointing north for odd N, a side facing north for even N. `--rotation` turns it
   by that many degrees, counter-clockwise.
 * The edge is **exact**: straight sides (no staircase), vertices and tangent points on the theoretical outline,
@@ -607,7 +618,7 @@ python circle_dem_to_stl.py --input dem.tif --cx 2601000 --cy 1201000 --radius 3
 * Incompatible with `--polygon`, `--clip-to-place` and `--smooth-wall`. Like `--smooth-wall`, the mask must be
   a single piece without holes: use `--sea-level` or `--fill-with-copernicus` for areas without data.
   Downloaded data (`--source`, `--download-copernicus`) covers the disc that encloses the whole part.
-* `check_stl.py` accepts the same `--sides`, `--circle-mode`, `--corner-radius` (mm) and `--rotation` to check
+* `check_stl.py` accepts the same `--sides`, `--circle-mode`, `--corner-radius` (mm), `--ref-outline` and `--rotation` to check
   the exact footprint of the part.
 
 ### Cutting by polygon (`--polygon`)

@@ -271,6 +271,9 @@ def main():
     p.add_argument("--circle-mode", choices=("inscribed", "circumscribed"), default=None)
     p.add_argument("--corner-radius", type=float, default=0.0, help="rayon d'arrondi en mm imprimés")
     p.add_argument("--rotation", type=float, default=0.0)
+    p.add_argument("--ref-outline", choices=("sharp", "rounded"), default="sharp",
+                   help="comme dans circle_dem_to_stl.py : sharp = le cercle décrit le polygone à angles vifs ; "
+                        "rounded = il est tangent aux arrondis (mode inscribed)")
     args = p.parse_args()
     shape_mm = None
     if args.sides is not None:
@@ -279,7 +282,7 @@ def main():
         import regular_polygon
         try:
             shape_mm = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.diameter_mm / 2.0,
-                                                      args.corner_radius, args.rotation)
+                                                      args.corner_radius, args.rotation, args.ref_outline)
         except regular_polygon.ShapeError as e:
             sys.exit(f"Erreur : {e}")
     try:

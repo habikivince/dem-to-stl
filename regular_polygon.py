@@ -17,8 +17,16 @@ Mode « inscribed »     : le polygone est inscrit dans le cercle de référence
 Mode « circumscribed » : le polygone est circonscrit au cercle de référence, ses côtés lui sont TANGENTS :
                          a = ref_radius, Rc = a / cos(pi/n).
 
-Le cercle de référence décrit toujours le polygone à angles vifs sous-jacent, arrondi ou non : l'arrondi
-est une modification du polygone, il ne change pas la signification du rayon de référence.
+Que décrit le cercle de référence quand les sommets sont arrondis ? Deux lectures, au choix (ref_outline) :
+
+  « sharp »   (défaut) le cercle décrit le polygone à angles vifs, avant arrondi : en mode inscribed, ses
+              sommets vifs sont sur le cercle, puis l'arrondi les raccourcit, et le contour arrondi reste
+              entièrement à l'intérieur du cercle sans le toucher (sauf r = 0) ;
+  « rounded » le cercle décrit le contour arrondi : en mode inscribed, il est TANGENT aux cercles d'arrondi
+              des sommets, c'est-à-dire qu'il touche le sommet de chaque arc : le contour arrondi est inscrit
+              dans le cercle. Le polygone sous-jacent à angles vifs est alors plus grand, ses sommets vifs
+              sont au-delà du cercle. En mode circumscribed rien ne change : l'arrondi ne déplace pas les côtés,
+              qui restent tangents au cercle.
 
 Arrondi : chaque sommet est remplacé par un congé circulaire tangent aux deux côtés voisins, de rayon r.
 Le centre du congé est à r / cos(pi/n) du sommet, sur la bissectrice ; les points de tangence sont à
@@ -36,6 +44,7 @@ import numpy as np
 MIN_SIDES = 3
 MAX_SIDES = 360
 CIRCLE_MODES = ("inscribed", "circumscribed")
+REF_OUTLINES = ("sharp", "rounded")
 MAX_ARC_SEGMENTS = 20000          # garde-fou : tolérance absurdement fine
 REL_TOL = 1e-9                    # tolérance relative sur les comparaisons de longueurs
 BOUNDARY_TOL = 1e-9               # tolérance relative de contains() : frontière incluse de façon déterministe
@@ -59,6 +68,7 @@ class RegularPolygon:
     ref_radius: float
     corner_radius: float = 0.0
     rotation_deg: float = 0.0
+    ref_outline: str = "sharp"
 
     def __post_init__(self):
         if isinstance(self.n, bool) or not isinstance(self.n, (int, np.integer)):
@@ -76,6 +86,12 @@ class RegularPolygon:
                              f"(reçu : {self.corner_radius!r}).")
         if not _finite(self.rotation_deg):
             raise ShapeError(f"la rotation doit être un nombre fini (reçu : {self.rotation_deg!r}).")
+        if self.ref_outline not in REF_OUTLINES:
+            raise ShapeError(f"contour de référence inconnu : {self.ref_outline!r} (attendu : {', '.join(REF_OUTLINES)}).")
+        if self.tangent_to_fillets and self.corner_radius > self.ref_radius * (1.0 + REL_TOL):
+            raise ShapeError(f"le rayon d'arrondi ({self.corner_radius:g}) dépasse le rayon du cercle de référence "
+                             f"({self.ref_radius:g}) : un contour arrondi ne peut pas être inscrit dans un cercle plus "
+                             f"petit que son rayon d'arrondi.")
         if self.corner_radius > self.apothem * (1.0 + REL_TOL):
             raise ShapeError(f"le rayon d'arrondi ({self.corner_radius:g}) dépasse l'apothème du polygone "
                              f"({self.apothem:g}) : les congés de deux sommets voisins se chevaucheraient.")
@@ -87,17 +103,27 @@ class RegularPolygon:
         return math.pi / self.n
 
     @property
+    def tangent_to_fillets(self):
+        """Vrai si le cercle de référence est tangent aux cercles d'arrondi (ref_outline « rounded », mode
+        inscribed, sommets arrondis). Sinon il décrit le polygone à angles vifs."""
+        return self.ref_outline == "rounded" and self.circle_mode == "inscribed" and self.corner_radius > 0
+
+    @property
     def circumradius(self):
         """Rayon circonscrit Rc : centre -> sommet du polygone à angles vifs."""
-        if self.circle_mode == "inscribed":
+        if self.circle_mode == "inscribed" and not self.tangent_to_fillets:
             return float(self.ref_radius)
-        return float(self.ref_radius) / math.cos(self.half_angle)
+        return self.apothem / math.cos(self.half_angle)
 
     @property
     def apothem(self):
-        """Apothème a : centre -> milieu d'un côté (inchangé par l'arrondi)."""
+        """Apothème a : centre -> milieu d'un côté (inchangé par l'arrondi, qui ne déplace pas les côtés).
+        Contour de référence arrondi en mode inscribed : le contour touche le cercle au sommet de chaque arc,
+        (a - r) / cos(pi/n) + r = R, d'où a = r + (R - r) cos(pi/n)."""
         if self.circle_mode == "circumscribed":
             return float(self.ref_radius)
+        if self.tangent_to_fillets:
+            return self.corner_radius + (float(self.ref_radius) - self.corner_radius) * math.cos(self.half_angle)
         return float(self.ref_radius) * math.cos(self.half_angle)
 
     @property
@@ -107,7 +133,11 @@ class RegularPolygon:
 
     @property
     def max_corner_radius(self):
-        """Plus grand rayon d'arrondi admis : l'apothème (le contour est alors un cercle de rayon a)."""
+        """Plus grand rayon d'arrondi admis : l'apothème (le contour est alors un cercle de rayon a). Quand le
+        contour arrondi est inscrit dans le cercle de référence, c'est le rayon de ce cercle (c'est aussi l'apothème
+        à ce maximum)."""
+        if self.ref_outline == "rounded" and self.circle_mode == "inscribed":
+            return float(self.ref_radius)
         return self.apothem
 
     @property
@@ -153,7 +183,7 @@ class RegularPolygon:
     def scaled(self, k):
         """Même forme, toutes les longueurs multipliées par k (changement d'unité)."""
         return RegularPolygon(self.n, self.circle_mode, self.ref_radius * k, self.corner_radius * k,
-                              self.rotation_deg)
+                              self.rotation_deg, self.ref_outline)
 
     def name(self):
         return _SIDE_NAMES.get(self.n, f"polygone à {self.n} côtés")
@@ -297,8 +327,12 @@ class RegularPolygon:
 
     # ------------------------------------------------------------------ description
     def describe(self, unit="", digits=3):
-        mode = ("inscrit : sommets sur le cercle de référence" if self.circle_mode == "inscribed"
-                else "circonscrit : côtés tangents au cercle de référence")
+        if self.circle_mode == "circumscribed":
+            mode = "circonscrit : côtés tangents au cercle de référence"
+        elif self.tangent_to_fillets:
+            mode = "inscrit : cercle de référence tangent aux arrondis des sommets"
+        else:
+            mode = "inscrit : sommets sur le cercle de référence"
         f = lambda v: f"{v:.{digits}f} {unit}".rstrip()  # noqa: E731
         s = (f"{self.name()} régulier {mode} ; rayon de référence {f(self.ref_radius)}, "
              f"apothème {f(self.apothem)}, rayon circonscrit {f(self.circumradius)}, côté {f(self.side)}")

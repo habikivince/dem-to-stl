@@ -646,6 +646,7 @@ def test_cli_relief_follows_the_dem_inside_the_shape(monkeypatch, tmp_path, dem)
     (["--rotation", "10"], "requiert --sides"),
     (["--corner-tol-mm", "0.01"], "requiert --sides"),
     (["--corner-segments", "4"], "requiert --sides"),
+    (["--ref-outline", "rounded"], "requiert --sides"),
     (["--sides", "6"], "--circle-mode"),
     (["--sides", "2", "--circle-mode", "inscribed"], "entre 3 et 360"),
     (["--sides", "361", "--circle-mode", "inscribed"], "entre 3 et 360"),
@@ -836,3 +837,124 @@ def test_cli_without_sides_still_requests_the_reference_radius(monkeypatch, tmp_
                                       "--print-spacing-mm", "1", "--output", "cop.stl", "--cache-dir", "cache"])
     circle_dem_to_stl.main()
     assert radii == [1500.0]
+
+
+# ---------------------------------------------------------------- contour de référence : angles vifs ou arrondi (--ref-outline)
+
+@pytest.mark.parametrize("n", (3, 4, 5, 6, 8, 12, 37))
+@pytest.mark.parametrize("r", (0.5, 3.0, 10.0))
+def test_rounded_reference_circle_is_tangent_to_every_fillet_circle(n, r):
+    """ref_outline « rounded », mode inscribed : le cercle de référence touche le sommet de chaque arc d'arrondi
+    sans le dépasser. Les centres des congés sont donc à R - r du centre (tangence intérieure)."""
+    R = 30.0
+    shp = RegularPolygon(n, "inscribed", R, r, 13.0, "rounded")
+    assert shp.fillet_center_distance == pytest.approx(R - r, rel=1e-12)
+    assert shp.extreme_radius == pytest.approx(R, rel=1e-12)
+    P = shp.outline_points(tol=1e-7)                        # contour finement discrétisé, indépendant de contains()
+    d = np.hypot(P[:, 0], P[:, 1])
+    assert d.max() <= R * (1.0 + 1e-12) and d.max() == pytest.approx(R, abs=1e-6)
+    ang = shp.phase + 2.0 * math.pi * np.arange(n) / n      # direction de chaque sommet vif
+    assert shp.contains(R * (1.0 - 1e-9) * np.cos(ang), R * (1.0 - 1e-9) * np.sin(ang)).all()
+    assert not shp.contains(R * (1.0 + 1e-6) * np.cos(ang), R * (1.0 + 1e-6) * np.sin(ang)).any()
+    # le polygone à angles vifs sous-jacent est plus grand que le cercle : ses sommets le dépassent
+    assert shp.circumradius > R
+    assert shp.apothem == pytest.approx(r + (R - r) * math.cos(math.pi / n), rel=1e-12)
+
+
+@pytest.mark.parametrize("n", (3, 6, 7))
+def test_default_reference_is_the_sharp_polygon_and_the_rounded_contour_stays_inside_the_circle(n):
+    R, r = 30.0, 4.0
+    shp = RegularPolygon(n, "inscribed", R, r)
+    assert shp.ref_outline == "sharp" and shp.circumradius == R
+    # c = R cos(h)/cos(h) - r/cos(h) : l'arrondi raccourcit le sommet de r (1/cos(h) - 1)
+    assert shp.extreme_radius == pytest.approx(R - r * (1.0 / math.cos(math.pi / n) - 1.0), rel=1e-12)
+    assert shp.extreme_radius < R
+
+
+@pytest.mark.parametrize("n,r", [(3, 0.0), (6, 0.0), (6, 2.5), (5, 7.0)])
+def test_rounded_reference_changes_nothing_in_circumscribed_mode_or_without_rounding(n, r):
+    for mode in ("circumscribed",) if r else MODES:
+        sharp = RegularPolygon(n, mode, 20.0, r, 7.0, "sharp")
+        rounded = RegularPolygon(n, mode, 20.0, r, 7.0, "rounded")
+        assert rounded.apothem == sharp.apothem and rounded.circumradius == sharp.circumradius
+        assert np.array_equal(rounded.outline_points(tol=1e-4), sharp.outline_points(tol=1e-4))
+
+
+def test_rounded_reference_with_a_corner_radius_equal_to_the_circle_gives_the_circle():
+    R = 25.0
+    shp = RegularPolygon(6, "inscribed", R, R, 0.0, "rounded")
+    assert shp.max_corner_radius == R and shp.apothem == pytest.approx(R, rel=1e-12)
+    P = shp.outline_points(tol=1e-6)
+    assert np.hypot(P[:, 0], P[:, 1]) == pytest.approx(R, abs=1e-9)
+    assert shoelace(P) == pytest.approx(math.pi * R * R, rel=1e-6)
+    with pytest.raises(ShapeError, match="dépasse le rayon du cercle de référence"):
+        RegularPolygon(6, "inscribed", R, R * 1.001, 0.0, "rounded")
+
+
+def test_ref_outline_is_validated_kept_by_scaled_and_described():
+    with pytest.raises(ShapeError, match="contour de référence inconnu"):
+        RegularPolygon(6, "inscribed", 10.0, 1.0, 0.0, "tangent")
+    shp = RegularPolygon(6, "inscribed", 10.0, 2.0, 0.0, "rounded").scaled(3.0)
+    assert shp.ref_outline == "rounded" and shp.extreme_radius == pytest.approx(30.0, rel=1e-12)
+    assert "tangent aux arrondis" in shp.describe("mm") and "tangent" not in RegularPolygon(6, "inscribed", 10.0, 2.0).describe()
+
+
+def test_cli_ref_outline_rounded_makes_the_rounded_piece_touch_the_reference_circle(monkeypatch, tmp_path, dem):
+    common = ("--sides", "6", "--circle-mode", "inscribed", "--corner-radius", "5")
+    sharp = wall_vertices(check_stl.read_stl(str(cli(monkeypatch, tmp_path, dem, *common, output="s.stl"))))
+    rounded = wall_vertices(check_stl.read_stl(str(cli(monkeypatch, tmp_path, dem, *common, "--ref-outline",
+                                                          "rounded", output="r.stl"))))
+    # sharp : les sommets vifs sont sur le cercle de Ø 60, puis l'arrondi les raccourcit de r (1/cos 30° - 1)
+    assert np.hypot(sharp[:, 0], sharp[:, 1]).max() == pytest.approx(30.0 - 5.0 * (1.0 / math.cos(math.pi / 6) - 1.0),
+                                                                     abs=2e-4)
+    # rounded : le contour arrondi touche le cercle de Ø 60 et ne le dépasse pas
+    assert np.hypot(rounded[:, 0], rounded[:, 1]).max() == pytest.approx(30.0, abs=2e-4)
+    # le polygone sous-jacent est plus grand : la pièce est plus large que celle de « sharp »
+    assert np.ptp(rounded[:, 0]) > np.ptp(sharp[:, 0]) + 0.5
+
+
+def test_cli_ref_outline_rounded_is_checked_by_check_stl_and_distinguished_by_name(monkeypatch, tmp_path, dem, capsys):
+    out = cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "inscribed", "--corner-radius", "5",
+              "--ref-outline", "rounded")
+    tris = check_stl.read_stl(str(out))
+    assert_valid_solid(tris)
+    good = check_stl.check(tris, 60.0, 2.0, radius_m=300.0, shape_mm=RegularPolygon(6, "inscribed", 30.0, 5.0, 0.0, "rounded"),
+                           tol_mm=0.01)
+    assert all(ok for _, ok, _ in good), good
+    assert not check_stl.check(tris, 60.0, 2.0, shape_mm=RegularPolygon(6, "inscribed", 30.0, 5.0), tol_mm=0.01)[0][1]
+    monkeypatch.setattr(sys, "argv", ["check_stl.py", str(out), "--diameter-mm", "60", "--base-mm", "2", "--radius", "300",
+                                      "--sides", "6", "--circle-mode", "inscribed", "--corner-radius", "5",
+                                      "--ref-outline", "rounded"])
+    with pytest.raises(SystemExit) as e:
+        check_stl.main()
+    assert e.value.code == 0 and "[OK ] dimensions de la pièce" in capsys.readouterr().out
+    # le nom par défaut distingue les deux lectures (même forme demandée, pièces différentes)
+    cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "inscribed", "--corner-radius", "5",
+        "--ref-outline", "rounded", output=None)
+    cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "inscribed", "--corner-radius", "5", output=None)
+    names = sorted(p.name for p in (tmp_path / "output").glob("*6cotes-inscrit_r5mm*.stl"))
+    assert any(n.endswith("_r5mm_cercle-tangent.stl") for n in names) and any(n.endswith("_r5mm.stl") for n in names)
+
+
+def test_cli_ref_outline_rounded_limits_the_corner_radius_to_the_reference_radius(monkeypatch, tmp_path, dem, capsys):
+    common = ["--sides", "6", "--circle-mode", "inscribed", "--ref-outline", "rounded"]
+    msg = fails(monkeypatch, tmp_path, dem, *common, "--corner-radius", "30.5")
+    assert "dépasse le rayon du cercle de référence" in msg and "--ref-outline rounded" in msg
+    cli(monkeypatch, tmp_path, dem, *common, "--corner-radius", "30", "--dry-run", output=None)       # un cercle : accepté
+    assert "pièce : 60.00 x 60.00 mm" in capsys.readouterr().out
+    # sans --ref-outline rounded, la limite reste l'apothème (25,98 mm)
+    assert "dépasse l'apothème" in fails(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "inscribed",
+                                         "--corner-radius", "28")
+
+
+def test_cli_ref_outline_rounded_is_a_noted_no_op_when_it_cannot_apply(monkeypatch, tmp_path, dem, capsys):
+    a = cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "circumscribed", "--corner-radius", "3",
+            output="a.stl")
+    capsys.readouterr()
+    b = cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "circumscribed", "--corner-radius", "3",
+            "--ref-outline", "rounded", output="b.stl")
+    assert "sans effet en mode circumscribed" in capsys.readouterr().out
+    assert np.array_equal(check_stl.read_stl(str(a)), check_stl.read_stl(str(b)))
+    cli(monkeypatch, tmp_path, dem, "--sides", "6", "--circle-mode", "inscribed", "--ref-outline", "rounded",
+        "--dry-run", output=None)
+    assert "sans --corner-radius (angles vifs)" in capsys.readouterr().out

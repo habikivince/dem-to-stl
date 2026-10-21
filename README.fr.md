@@ -228,6 +228,7 @@ python circle_dem_to_stl.py \
 | `--sides` | Polygone régulier à N côtés (3-360) au lieu du disque (voir ci-dessous) | désactivé |
 | `--circle-mode` | Avec `--sides` : `inscribed` (sommets sur le cercle de référence) ou `circumscribed` (côtés tangents) | requis avec `--sides` |
 | `--corner-radius` | Avec `--sides` : rayon d'arrondi des sommets, en mm imprimés | 0 (angles vifs) |
+| `--ref-outline` | Avec `--sides`, `--circle-mode inscribed` et `--corner-radius` : ce que décrit le cercle de référence, `sharp` (le polygone avant arrondi) ou `rounded` (tangent aux arrondis des sommets) | `sharp` |
 | `--rotation` | Avec `--sides` : rotation en degrés, sens antihoraire | 0 |
 | `--corner-tol-mm` | Avec `--sides` et `--corner-radius` : flèche maximale des arcs, en mm imprimés | 0.005 |
 | `--corner-segments` | Avec `--sides` et `--corner-radius` : nombre de segments par arc (remplace `--corner-tol-mm`) | calculé |
@@ -611,8 +612,19 @@ python circle_dem_to_stl.py --input mnt.tif --cx 2601000 --cy 1201000 --radius 3
   dimensions réellement imprimées (`pièce : L x l mm`).
 * `--corner-radius R` arrondit les sommets par des arcs de cercle tangents aux côtés, `R` en **mm imprimés**
   (0 ou omis : angles vifs). Maximum : l'apothème de la pièce ; à cette valeur le contour devient un cercle.
-  Le cercle de référence décrit toujours le polygone à angles vifs, même arrondi : la pièce arrondie est donc
-  un peu plus petite aux sommets (rayon extrême du contour : (a − R)/cos(π/N) + R, affiché dans le journal).
+* Avec des sommets arrondis en mode `inscribed`, `--ref-outline` choisit **ce que décrit le cercle de
+  référence** :
+  * `sharp` (défaut) : le polygone *avant* arrondi. Ses sommets sont sur le cercle, puis l'arrondi les
+    raccourcit : la pièce arrondie est un peu à l'intérieur du cercle et ne le touche plus (rayon extrême du
+    contour : (a − R)/cos(π/N) + R = réf − R·(1/cos(π/N) − 1), affiché dans le journal).
+  * `rounded` : le **contour arrondi**. Le cercle de référence est tangent au cercle de chaque arrondi : il
+    touche le sommet de chaque arc sans jamais le dépasser, et la pièce tient exactement dans `--diameter-mm`.
+    Le polygone à angles vifs sous-jacent est alors plus grand (ses sommets sont au-delà du cercle). Les
+    centres des arrondis sont à (rayon de référence − R) du centre ; le maximum de `--corner-radius` devient
+    le rayon de référence (le contour est alors le cercle de référence lui-même). Les noms de fichier
+    reçoivent le suffixe `_cercle-tangent` : les deux lectures ne s'écrasent jamais.
+  En mode `circumscribed`, rien ne change entre les deux : l'arrondi ne déplace pas les côtés, qui restent
+  tangents au cercle (l'option est acceptée et le journal dit qu'elle est sans effet).
 * Orientation par défaut : un sommet au nord pour N impair, un côté au nord pour N pair. `--rotation` la fait
   tourner de ce nombre de degrés, dans le sens antihoraire.
 * Le bord est **exact** : côtés droits (pas d'escalier), sommets et points de tangence sur le contour théorique,
@@ -622,7 +634,7 @@ python circle_dem_to_stl.py --input mnt.tif --cx 2601000 --cy 1201000 --radius 3
 * Incompatible avec `--polygon`, `--clip-to-place` et `--smooth-wall`. Comme `--smooth-wall`, le masque doit
   être d'un seul tenant, sans trou : utilise `--sea-level` ou `--fill-with-copernicus` pour les zones sans donnée.
   Les données téléchargées (`--source`, `--download-copernicus`) couvrent le disque qui enveloppe toute la pièce.
-* `check_stl.py` accepte les mêmes `--sides`, `--circle-mode`, `--corner-radius` (mm) et `--rotation` pour
+* `check_stl.py` accepte les mêmes `--sides`, `--circle-mode`, `--corner-radius` (mm), `--ref-outline` et `--rotation` pour
   contrôler l'encombrement exact de la pièce.
 
 ### Découpe par polygone (`--polygon`)

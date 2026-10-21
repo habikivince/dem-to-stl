@@ -149,6 +149,8 @@ def default_stem(args):
         name += f"_{sides}cotes-{'inscrit' if args.circle_mode == 'inscribed' else 'circonscrit'}"
         if getattr(args, "corner_radius", None):
             name += f"_r{args.corner_radius:g}mm"
+            if getattr(args, "ref_outline", None) == "rounded" and args.circle_mode == "inscribed":
+                name += "_cercle-tangent"
     name = name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
     if getattr(args, "base_elevation", None) is not None:
         name += f"_ref{args.base_elevation:g}m".replace("-", "m")
@@ -284,7 +286,8 @@ MIN_CORNER_TOL_MM = 1e-6          # en dessous, la précision du STL (float32) n
 
 
 def build_shape(args, log=log):
-    """Polygone régulier (en mètres de terrain) décrit par --sides, --circle-mode, --corner-radius, --rotation.
+    """Polygone régulier (en mètres de terrain) décrit par --sides, --circle-mode, --corner-radius, --rotation,
+    --ref-outline.
     Le cercle de référence est celui de --radius (mètres de terrain) et de --diameter-mm (son diamètre imprimé) :
     même échelle que pour un disque. --corner-radius est donné en mm imprimés. Échoue avec un message clair ;
     renseigne args.corner_tol_mm (défaut DEFAULT_CORNER_TOL_MM)."""
@@ -304,17 +307,32 @@ def build_shape(args, log=log):
         fail(f"--corner-tol-mm doit être un nombre >= {MIN_CORNER_TOL_MM:g} (en mm imprimés).")
     if args.corner_segments is not None and args.corner_segments < 1:
         fail("--corner-segments doit être un entier >= 1.")
+    ref_outline = args.ref_outline or "sharp"
     try:
         sharp = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.radius, 0.0, rotation)
     except regular_polygon.ShapeError as e:
         fail(str(e))
-    apothem_mm = sharp.apothem * scale
-    if corner_mm > apothem_mm * (1.0 + 1e-9):
-        fail(f"--corner-radius ({corner_mm:g} mm) dépasse l'apothème de la forme ({apothem_mm:.4g} mm) : les "
-             f"arrondis de deux sommets voisins se chevaucheraient. Maximum : {apothem_mm:.4g} mm "
-             f"(à cette valeur, le contour devient un cercle de rayon {apothem_mm:.4g} mm).")
-    shape = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.radius, min(corner_mm / scale, sharp.apothem),
-                                           rotation)
+    if ref_outline == "rounded" and args.circle_mode == "inscribed" and corner_mm > 0:
+        # contour arrondi inscrit dans le cercle de référence : r va jusqu'au rayon de ce cercle (un cercle)
+        limit_mm = args.diameter_mm / 2.0
+        if corner_mm > limit_mm * (1.0 + 1e-9):
+            fail(f"--corner-radius ({corner_mm:g} mm) dépasse le rayon du cercle de référence ({limit_mm:.4g} mm) : "
+                 f"avec --ref-outline rounded, le contour arrondi est inscrit dans ce cercle. Maximum : "
+                 f"{limit_mm:.4g} mm (à cette valeur, le contour devient le cercle de référence).")
+        limit_m = args.radius
+    else:
+        limit_mm = sharp.apothem * scale
+        if corner_mm > limit_mm * (1.0 + 1e-9):
+            fail(f"--corner-radius ({corner_mm:g} mm) dépasse l'apothème de la forme ({limit_mm:.4g} mm) : les "
+                 f"arrondis de deux sommets voisins se chevaucheraient. Maximum : {limit_mm:.4g} mm "
+                 f"(à cette valeur, le contour devient un cercle de rayon {limit_mm:.4g} mm).")
+        limit_m = sharp.apothem
+    if args.ref_outline == "rounded" and (args.circle_mode == "circumscribed" or corner_mm <= 0):
+        log("note : --ref-outline rounded est sans effet "
+            + ("en mode circumscribed (l'arrondi ne déplace pas les côtés, qui restent tangents au cercle de "
+               "référence)" if args.circle_mode == "circumscribed" else "sans --corner-radius (angles vifs)"))
+    shape = regular_polygon.RegularPolygon(args.sides, args.circle_mode, args.radius, min(corner_mm / scale, limit_m),
+                                           rotation, ref_outline)
     shape_mm = shape.scaled(scale)
     try:
         k = shape_mm.arc_segments(args.corner_tol_mm, args.corner_segments)
@@ -772,6 +790,14 @@ def main():
                     help="Avec --sides : rayon d'arrondi des sommets, en mm imprimés (raccordement tangent exact "
                          "aux côtés ; 0 ou omis = angles vifs). Maximum : l'apothème de la pièce (à ce maximum, le "
                          "contour devient un cercle).")
+    p.add_argument("--ref-outline", choices=regular_polygon.REF_OUTLINES, default=None,
+                    help="Avec --sides et --corner-radius, en mode inscribed : ce que décrit le cercle de référence. "
+                         "sharp (défaut) = le polygone à angles vifs, avant arrondi : ses sommets sont sur le cercle, "
+                         "puis l'arrondi les raccourcit et le contour arrondi ne touche plus le cercle. rounded = le "
+                         "contour arrondi : le cercle est tangent aux cercles d'arrondi des sommets, le contour arrondi "
+                         "touche le cercle au sommet de chaque arc et la pièce tient dans --diameter-mm (le maximum de "
+                         "--corner-radius devient alors le rayon du cercle). Sans effet en mode circumscribed : les "
+                         "côtés restent tangents au cercle.")
     p.add_argument("--rotation", type=float, default=None,
                     help="Avec --sides : rotation du polygone autour du centre, en degrés, sens antihoraire "
                          "(défaut 0 = orientation par défaut)")
@@ -796,6 +822,7 @@ def main():
 
     if args.sides is None:
         stray = [n for n, v in (("--circle-mode", args.circle_mode), ("--corner-radius", args.corner_radius),
+                                ("--ref-outline", args.ref_outline),
                                 ("--rotation", args.rotation), ("--corner-tol-mm", args.corner_tol_mm),
                                 ("--corner-segments", args.corner_segments)) if v is not None]
         if stray:
@@ -991,6 +1018,8 @@ def main():
     if shape is not None:
         description = (f"Relief DEM : {shape.name()} {args.circle_mode} (cercle de référence Ø {args.diameter_mm:g} mm"
                        + (f", sommets arrondis r = {args.corner_radius:g} mm" if args.corner_radius else "")
+                       + (", cercle tangent aux arrondis" if shape.ref_outline == "rounded" and shape.tangent_to_fillets
+                          else "")
                        + f"), exagération verticale x{args.vexag:g}, socle {args.base_mm:g} mm"
                        + (f", source {used}" if used else ""))
     write_outputs(tris, paths, stem, description, attribution, progress=progress)
