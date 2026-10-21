@@ -150,6 +150,8 @@ def default_stem(args):
         if getattr(args, "corner_radius", None):
             name += f"_r{args.corner_radius:g}mm"
     name = name if args.vexag == 1 else f"{name}_x{args.vexag:g}"
+    if getattr(args, "base_elevation", None) is not None:
+        name += f"_ref{args.base_elevation:g}m".replace("-", "m")
     return name + "_courbe" if getattr(args, "vexag_curve", None) else name
 
 
@@ -398,7 +400,7 @@ def write_report_file(path, args, paths, info, used, attribution, clip, shape, p
         model={"shape": kind, "diameter_mm": args.diameter_mm, "base_mm": args.base_mm, "vexag": args.vexag,
                "scale_mm_per_m": info.get("scale_mm_per_m"), "pixel_size_m": info.get("pixel_size_m"),
                "print_spacing_mm": args.print_spacing_mm, "grid": info.get("grid"), "cells": info.get("cells"),
-               "vexag_curve": info.get("vexag_curve")},
+               "vexag_curve": info.get("vexag_curve"), "base_elevation_m": info.get("base_elevation")},
         relief=info.get("relief"),
         source={"used": used, "input": [os.fspath(x) for x in inputs if x is not None],
                 "fill_with_copernicus": bool(args.fill_with_copernicus), "attribution": attribution or None,
@@ -421,13 +423,17 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
                 print_spacing_mm, sea_level=None, min_elevation=-50.0, land_threshold=1.0,
                 smooth_wall=False, clip=None, resample="auto", bottom="grid", bottom_max_cells=None,
                 diagonal="fixed", top="grid", top_tol_mm=0.05, shape=None, corner_tol_mm=DEFAULT_CORNER_TOL_MM,
-                corner_segments=None, info=None, preview_path=None, vexag_curve=None, extrapolate_edges=False):
+                corner_segments=None, info=None, preview_path=None, vexag_curve=None, extrapolate_edges=False,
+                base_elevation=None):
     """info : dict optionnel, rempli avec ce que --report écrit (échelle, relief, nombres de triangles...).
     preview_path : si donné, aperçu ombré PNG de la pièce, écrit avant le maillage (voir preview.py).
     vexag_curve : AltitudeCurve (vexag_curve.py) ou None : correspondance altitude -> altitude équivalente appliquée
     avant l'échelle et l'exagération.
     extrapolate_edges : rétablit l'ancien comblement de gdal.FillNodata, qui prolonge le relief jusqu'à 50 pixels
-    de travail au-delà des données (voir raster.warp_window). Par défaut, seuls les trous sont comblés."""
+    de travail au-delà des données (voir raster.warp_window). Par défaut, seuls les trous sont comblés.
+    base_elevation : altitude (m) imposée au dessus du socle (z = 0 sur la pièce). Tout ce qui est plus bas est aplati à
+    ce niveau, toutes les parties plus hautes sont conservées (contrairement à sea_level, qui ne garde que la plus
+    grande composante). None : le point le plus bas du modèle, comme avant."""
     dst_srs_wkt, cx, cy = raster.resolve_target_crs_and_center(input_path, lat, lon, cx, cy)
 
     clip_rings = None
@@ -538,6 +544,26 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         f"{'le contour' if clip is not None else 'la forme' if shape is not None else 'le disque'}")
 
     min_elev = sea_level if sea_level is not None else elev[clean_mask].min()
+    if base_elevation is not None:
+        nodes = report.touched_nodes(quad_ok)
+        node_alt = elev[nodes]
+        node_alt = node_alt[np.isfinite(node_alt)]
+        lowest, highest = float(node_alt.min()), float(node_alt.max())
+        if base_elevation >= highest:
+            sys.exit(f"Erreur : --base-elevation ({base_elevation:g} m) n'est pas sous le point le plus haut de la "
+                     f"zone ({highest:.1f} m) : il ne resterait aucun relief.")
+        n_cut = int((node_alt < base_elevation).sum())
+        elev = np.where(np.isfinite(elev) & (elev < base_elevation), base_elevation, elev)
+        min_elev = float(base_elevation)
+        if n_cut:
+            log(f"--base-elevation {base_elevation:g} m : {n_cut} noeud(s) du modèle sur {node_alt.size} "
+                f"({100.0 * n_cut / node_alt.size:.1f} %) sont plus bas (point le plus bas : {lowest:.1f} m) et sont "
+                f"aplatis à ce niveau ; tout ce qui est plus haut est conservé")
+        elif (lowest - base_elevation) * scale * vexag >= 0.005:
+            log(f"--base-elevation {base_elevation:g} m est sous le point le plus bas ({lowest:.1f} m) : le socle est "
+                f"épaissi de {(lowest - base_elevation) * scale * vexag:.2f} mm")
+        else:
+            log(f"--base-elevation {base_elevation:g} m = point le plus bas de la zone : sans effet")
 
     # hauteur du relief imprimé, affichée AVANT le maillage (étape longue) : on peut l'interrompre si elle surprend
     top_alt = elev[report.touched_nodes(quad_ok)]
@@ -572,7 +598,8 @@ def build_mesh(input_path, lat, lon, cx, cy, radius, diameter_mm, vexag, base_mm
         info.update(scale_mm_per_m=scale, pixel_size_m=pixel_size_m, radius_m=radius, grid=[W, H],
                     cells=int(quad_ok.sum()), relief=relief, triangles_top=n_top, triangles_bottom=n_bot,
                     triangles_wall=n_wall, triangles_total=len(tris),
-                    vexag_curve=None if vexag_curve is None else vexag_curve.as_list())
+                    vexag_curve=None if vexag_curve is None else vexag_curve.as_list(),
+                    base_elevation=base_elevation)
     return tris
 
 
@@ -685,6 +712,11 @@ def main():
                     help="Courbe d'exagération non linéaire : points « altitude:altitude_équivalente » en mètres "
                          "(ex. 0:0,500:500,2000:1100,4000:1800), interpolés en PCHIP monotone, appliqués avant l'échelle "
                          "et --vexag. Déforme le relief : la pièce n'est pas une réplique fidèle")
+    p.add_argument("--base-elevation", type=float, default=None, metavar="M",
+                    help="Altitude (m) placée au dessus du socle : tout ce qui est plus bas est aplati à ce niveau, "
+                         "tout ce qui est plus haut est conservé (défaut : le point le plus bas de la zone). Sert à "
+                         "couper un massif à une altitude, ou à garder le même zéro sur plusieurs pièces. "
+                         "Incompatible avec --sea-level")
     p.add_argument("--base-mm", type=float, default=None,
                     help="Épaisseur du socle plat, en mm (demandé interactivement si omis)")
     p.add_argument("--print-spacing-mm", type=float, default=0.2,
@@ -854,6 +886,9 @@ def main():
         args.vexag = ask_float("Exagération verticale", 1.0)
 
     validate_print(args)
+    if args.base_elevation is not None and args.sea_level is not None:
+        fail("--base-elevation et --sea-level s'excluent : --sea-level fixe déjà le niveau du socle et ne garde que "
+             "la plus grande composante de terre. Choisissez l'un des deux.")
     curve = None
     if args.vexag_curve is not None:
         try:
@@ -933,7 +968,8 @@ def main():
                           top=args.top, top_tol_mm=args.top_tol_mm, shape=shape,
                           corner_tol_mm=args.corner_tol_mm if shape is not None else DEFAULT_CORNER_TOL_MM,
                           corner_segments=args.corner_segments, info=info, preview_path=preview_file,
-                          vexag_curve=curve, extrapolate_edges=args.extrapolate_edges)
+                          vexag_curve=curve, extrapolate_edges=args.extrapolate_edges,
+                          base_elevation=args.base_elevation)
     except raster.InputError as e:
         fail(str(e))
     except RuntimeError as e:

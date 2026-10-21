@@ -174,6 +174,22 @@ that this is **not a faithful replica** (relative heights are altered) and print
 segment; the file name gets a `_courbe` suffix. With a curve, `check_stl.py --relief-m` must be given the
 *equivalent* relief (`relief.relief_equivalent_m` in the `--report` JSON).
 
+### Base altitude (`--base-elevation`)
+
+```bash
+python circle_dem_to_stl.py --input massif.tif --source-crs EPSG:2154 --cx 970000 --cy 6500000 --radius 8000 \
+    --diameter-mm 200 --vexag 1 --base-mm 8 --base-elevation 1000
+```
+
+By default the top of the base sits at the lowest point of the piece, so two pieces cut from the same range do not
+share the same zero. `--base-elevation M` fixes the altitude (metres) that sits at the top of the base: everything
+lower is flattened to it (the log gives the share of nodes concerned), everything higher is kept, **including
+summits that are not connected to the main one**. A value below the lowest point thickens the base by the
+difference. A value at or above the highest point is refused. The file name gets a `_ref<M>m` suffix and the
+`--report` JSON a `model.base_elevation_m` field. It cannot be combined with `--sea-level`: island mode already
+sets the base at sea level, but keeps only the largest land component and flattens any other summit (measured: a
+1300 m summit separate from the main massif is erased by `--sea-level 1000`, kept by `--base-elevation 1000`).
+
 ### All options
  
 | Option | Description | Default |
@@ -196,6 +212,7 @@ segment; the file name gets a `_courbe` suffix. With a curve, `check_stl.py --re
 | `--base-mm` | Flat base thickness, in mm | prompted if omitted (3) |
 | `--vexag` | Vertical exaggeration | prompted if omitted (1.0) |
 | `--vexag-curve` | Non-linear exaggeration: `alt:equivalent,...` points (m), PCHIP, applied before the scale and `--vexag`; not a faithful replica | disabled |
+| `--base-elevation` | Altitude (m) at the top of the base: lower is flattened, higher is kept (default: lowest point); excludes `--sea-level` | lowest point |
 | `--print-spacing-mm` | Target mesh resolution, in mm | 0.2 |
 | `--resample` | DEM resampling: `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
 | `--top` | Top-surface triangulation: `grid`, `adaptive` (prototype) | `grid` |

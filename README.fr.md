@@ -167,6 +167,23 @@ relatives sont modifiées) et affiche l'exagération moyenne par tronçon ; le n
 `_courbe`. Avec une courbe, `check_stl.py --relief-m` doit recevoir le relief *équivalent*
 (`relief.relief_equivalent_m` dans le JSON de `--report`).
 
+### Altitude du socle (`--base-elevation`)
+
+```bash
+python circle_dem_to_stl.py --input massif.tif --source-crs EPSG:2154 --cx 970000 --cy 6500000 --radius 8000 \
+    --diameter-mm 200 --vexag 1 --base-mm 8 --base-elevation 1000
+```
+
+Par défaut, le dessus du socle est au point le plus bas de la pièce : deux pièces découpées dans un même massif ne
+partagent donc pas le même zéro. `--base-elevation M` fixe l'altitude (en mètres) placée au dessus du socle : tout
+ce qui est plus bas est aplati à ce niveau (le journal donne la part de nœuds concernée), tout ce qui est plus haut
+est conservé, **y compris les sommets qui ne sont pas reliés au sommet principal**. Une valeur sous le point le plus
+bas épaissit le socle de la différence. Une valeur égale ou supérieure au point le plus haut est refusée. Le nom du
+fichier reçoit le suffixe `_ref<M>m` et le JSON de `--report` un champ `model.base_elevation_m`. L'option est
+incompatible avec `--sea-level` : le mode île place déjà le socle au niveau de la mer, mais ne garde que la plus
+grande composante de terre et aplatit tout autre sommet (mesuré : un sommet de 1300 m séparé du massif principal est
+effacé par `--sea-level 1000`, conservé par `--base-elevation 1000`).
+
 ### Mode île (relief entouré d'eau sans donnée fiable)
 
 ```bash
@@ -200,6 +217,7 @@ python circle_dem_to_stl.py \
 | `--base-mm` | Épaisseur du socle plat, en mm | demandé si omis (3) |
 | `--vexag` | Exagération verticale | demandée si omise (1.0) |
 | `--vexag-curve` | Exagération non linéaire : points `alt:équivalente,...` (m), PCHIP, appliquée avant l'échelle et `--vexag` ; pas une réplique fidèle | désactivé |
+| `--base-elevation` | Altitude (m) au dessus du socle : le plus bas est aplati, le plus haut conservé (défaut : point le plus bas) ; exclut `--sea-level` | point le plus bas |
 | `--print-spacing-mm` | Résolution cible du maillage, en mm | 0.2 |
 | `--resample` | Ré-échantillonnage du DEM : `auto`, `average`, `bilinear`, `cubic`, `cubicspline` | `auto` |
 | `--top` | Triangulation du dessus : `grid`, `adaptive` (prototype) | `grid` |
