@@ -18,6 +18,8 @@ import zlib
 
 import numpy as np
 
+from output_files import atomic_output
+
 MAX_SIDE_PX = 1600
 LIGHT_AZIMUTH_DEG = 315.0             # lumière venant du nord-ouest, convention cartographique
 LIGHT_ALTITUDE_DEG = 45.0
@@ -89,13 +91,7 @@ def preview_path(paths, requested):
 def write_preview(path, elev, quad_ok, pixel_m, vexag=1.0, max_side=MAX_SIDE_PX):
     """Écrit l'aperçu sous un nom temporaire puis le renomme. Retourne (largeur, hauteur) en pixels."""
     image = render(elev, quad_ok, pixel_m, vexag, max_side)
-    tmp = str(path) + ".part"
-    try:
+    with atomic_output(path) as tmp:
         with open(tmp, "wb") as f:
             f.write(png_bytes(image))
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
     return image.shape[1], image.shape[0]

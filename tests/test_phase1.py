@@ -189,6 +189,20 @@ def test_unreadable_inputs_are_clean_errors(monkeypatch, dem, tmp_path, kind):
     assert not (tmp_path / "o.stl").exists()
 
 
+def test_generation_preserves_existing_part_files(monkeypatch, dem, tmp_path):
+    outputs = [tmp_path / f"relief.{extension}" for extension in ("stl", "3mf", "obj", "png", "json")]
+    for output in outputs:
+        output.with_suffix(output.suffix + ".part").write_text("à garder")
+
+    run(monkeypatch, dem, tmp_path, output=str(outputs[0]), format="all",
+        preview=str(outputs[3]), report=str(outputs[4]))
+
+    for output in outputs:
+        assert output.is_file()
+        assert output.with_suffix(output.suffix + ".part").read_text() == "à garder"
+    assert all(path.is_file() for path in tmp_path.iterdir())
+
+
 def test_input_path_with_spaces_and_accents_works(monkeypatch, tmp_path):
     d = tmp_path / "données cervin é"
     d.mkdir()

@@ -27,6 +27,8 @@ from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
 
+from output_files import atomic_output
+
 CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 FORMATS = ("stl", "3mf", "obj")
 CHUNK = 200_000
@@ -117,8 +119,7 @@ def write_3mf(path, vertices, faces, title="dem-to-stl", description="", copyrig
             f'<model unit="millimeter" xml:lang="en-US" xmlns="{CORE_NS}">')
     head += "".join(f"<metadata name={quoteattr(k)}>{escape(v)}</metadata>" for k, v in meta if v)
     head += f"<resources><object id=\"1\" type=\"model\" name={quoteattr(title)}><mesh><vertices>"
-    tmp = str(path) + ".part"
-    try:
+    with atomic_output(path) as tmp:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=4) as z:
             z.writestr("[Content_Types].xml", CONTENT_TYPES)
             z.writestr("_rels/.rels", RELS)
@@ -130,16 +131,10 @@ def write_3mf(path, vertices, faces, title="dem-to-stl", description="", copyrig
                 for block in _face_lines(faces, '<triangle v1="%d" v2="%d" v3="%d"/>', 0):
                     m.write(block.encode("ascii"))
                 m.write(b'</triangles></mesh></object></resources><build><item objectid="1"/></build></model>')
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
 
 
 def write_obj(path, vertices, faces, title="dem-to-stl", comment=""):
-    tmp = str(path) + ".part"
-    try:
+    with atomic_output(path) as tmp:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(f"# dem-to-stl : {title}\n")
             f.write("# unité : millimètre (le format OBJ n'a pas d'unité ; axe Z vers le haut)\n")
@@ -151,11 +146,6 @@ def write_obj(path, vertices, faces, title="dem-to-stl", comment=""):
                 f.write(block)
             for block in _face_lines(faces, "f %d %d %d\n", 1):
                 f.write(block)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
 
 
 # ------------------------------------------------------------------ relecture (tests, check_stl.py)

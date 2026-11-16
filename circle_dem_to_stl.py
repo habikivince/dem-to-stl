@@ -29,6 +29,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import unicodedata
 
 import numpy as np
@@ -214,11 +215,10 @@ def prepare_outputs(paths):
         if os.path.isdir(path):
             fail(f"la sortie est un dossier ({path}) : donne un nom de fichier.")
         parent = os.path.dirname(os.path.abspath(path))
-        probe = path + ".part"
         try:
             os.makedirs(parent, exist_ok=True)
-            open(probe, "wb").close()
-            os.remove(probe)
+            with tempfile.NamedTemporaryFile(dir=parent):
+                pass
         except OSError as e:
             fail(f"impossible d'écrire dans {parent} ({e.strerror or e})")
 
