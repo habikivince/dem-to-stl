@@ -11,10 +11,11 @@ triangle, avec les mêmes sommets et des normales identiques à l'arrondi float3
 Le fichier est écrit sous un nom temporaire puis renommé : un échec en cours
 d'écriture ne laisse jamais de STL tronqué à la place d'un fichier valide.
 """
-import os
 import struct
 
 import numpy as np
+
+from output_files import atomic_output
 
 # 50 octets par triangle : normale (3 f4), 3 sommets (9 f4), attribut (u2)
 STL_DTYPE = np.dtype([("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("a", "<u2")])
@@ -31,8 +32,7 @@ def facet_normals(v):
 def write_stl_binary(tris, path, progress=None):
     tris = np.asarray(tris)
     n = len(tris)
-    tmp = str(path) + ".part"
-    try:
+    with atomic_output(path) as tmp:
         with open(tmp, "wb") as f:
             f.write(b"\x00" * 80)
             f.write(struct.pack("<I", n))
@@ -44,8 +44,3 @@ def write_stl_binary(tris, path, progress=None):
                 rec.tofile(f)
                 if progress is not None:
                     progress(min(start + CHUNK_TRIANGLES, n) - 1, n, "Écriture STL")
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise

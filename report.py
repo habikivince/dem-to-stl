@@ -20,6 +20,8 @@ import sys
 
 import numpy as np
 
+from output_files import atomic_output
+
 SCHEMA_VERSION = 1
 
 # Repère indicatif : relief imprimé d'environ 22,5 % du diamètre (45 mm pour 200 mm), exagération bornée à 1..8.
@@ -125,12 +127,6 @@ def build_report(*, outputs, model, relief, source, mesh_info, location, options
 def write_report(path, data):
     """Écrit le JSON sous un nom temporaire puis le renomme : jamais de rapport tronqué. Lève OSError/ValueError."""
     text = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    tmp = str(path) + ".part"
-    try:
+    with atomic_output(path) as tmp:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
