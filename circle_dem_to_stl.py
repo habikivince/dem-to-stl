@@ -195,6 +195,19 @@ def resolve_outputs(args):
     return {f: f"{stem}.{f}" for f in formats}
 
 
+def validate_output_paths(outputs, inputs):
+    """Refuse qu'une sortie remplace une entrée locale ou une autre sortie."""
+    input_paths = {os.path.normcase(os.path.realpath(path)) for path in inputs}
+    seen = set()
+    for path in outputs:
+        resolved = os.path.normcase(os.path.realpath(path))
+        if resolved in input_paths:
+            fail(f"la sortie {path} écraserait un fichier d'entrée.")
+        if resolved in seen:
+            fail(f"plusieurs sorties utilisent le même fichier ({path}).")
+        seen.add(resolved)
+
+
 def prepare_outputs(paths):
     """Crée les dossiers parents et vérifie qu'on peut écrire, AVANT le calcul."""
     for path in paths.values():
@@ -932,6 +945,9 @@ def main():
     paths = resolve_outputs(args)
     report_file = report.report_path(paths, args.report) if args.report else None
     preview_file = preview.preview_path(paths, args.preview) if args.preview else None
+    outputs = {**paths, **({"png": preview_file} if preview_file else {}),
+               **({"json": report_file} if report_file else {})}
+    validate_output_paths(outputs.values(), (args.input or []) + ([args.polygon] if args.polygon else []))
     est_kw = {}
     if shape is not None:
         scale = (args.diameter_mm / 2.0) / args.radius
@@ -953,8 +969,7 @@ def main():
             fail(str(e))
         if input_kind == "lidar" and args.fill_with_copernicus:
             fail("--fill-with-copernicus est incompatible avec une entrée LAS/LAZ.")
-    prepare_outputs({**paths, **({"png": preview_file} if preview_file else {}),
-                     **({"json": report_file} if report_file else {})})
+    prepare_outputs(outputs)
 
     used = None
     if source:

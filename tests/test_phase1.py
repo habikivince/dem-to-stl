@@ -142,6 +142,25 @@ def test_missing_output_folder_is_created_early(monkeypatch, dem, tmp_path):
     assert out.exists() and not Path(str(out) + ".part").exists()
 
 
+@pytest.mark.parametrize("option", ["output", "preview", "report"])
+def test_output_cannot_replace_the_input(monkeypatch, dem, tmp_path, option):
+    before = Path(dem).read_bytes()
+    alias = tmp_path / "alias"
+    alias.mkdir()
+    with pytest.raises(SystemExit, match="écraserait un fichier d'entrée"):
+        run(monkeypatch, dem, tmp_path, **{option: str(alias / ".." / Path(dem).name)})
+    assert Path(dem).read_bytes() == before
+    assert not (tmp_path / "o.stl").exists()
+
+
+@pytest.mark.parametrize("first,second", [("output", "report"), ("output", "preview"), ("preview", "report")])
+def test_two_outputs_cannot_share_a_path(monkeypatch, dem, tmp_path, first, second):
+    target = tmp_path / "shared.stl"
+    with pytest.raises(SystemExit, match="plusieurs sorties utilisent le même fichier"):
+        run(monkeypatch, dem, tmp_path, **{first: str(target), second: str(target)})
+    assert not target.exists() and not (tmp_path / "o.stl").exists()
+
+
 def test_unwritable_output_fails_before_any_computation(monkeypatch, dem, tmp_path):
     (tmp_path / "fichier").write_text("x")
     called = []
