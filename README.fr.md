@@ -290,6 +290,8 @@ ceux qui ont réellement été testés.
 | LAS, LAZ | `.las` `.laz` | **pris en charge, chaîne propre** | Requiert `laspy` (+`lazrs` pour les `.laz`). Classe sol 2 par défaut ; un nuage non classifié exige un `--lidar-select` explicite. Voir [Nuages de points](#nuages-de-points-lasllaz). |
 | XYZ texte, **grille régulière** | `.xyz` | **pris en charge** (GDAL « ASCII Gridded XYZ ») | Une ligne `x y z` par cellule d'une grille régulière, lignes dans l'un ou l'autre sens ; un point ou une ligne absent est du NoData (jamais zéro ; une altitude réelle de 0,000 m reste une valeur). Le fichier ne porte pas de CRS : `--source-crs` est obligatoire. Une liste de points dispersés n'est **pas** une grille et est refusée (« Ungridded dataset », ou « not recognized as a supported file format » si le fichier a une ligne d'en-tête ou des colonnes en plus) ; interpolez-la d'abord (par exemple avec `gdal_grid`), sachant que l'interpolation invente des valeurs entre les points. |
 | Tout autre raster ouvert par GDAL | | lu via GDAL (pas testé spécifiquement) | Mêmes règles de bandes, CRS, unités et NoData. |
+
+Ouvre uniquement des fichiers VRT de confiance. Un VRT peut faire lire à GDAL d'autres fichiers locaux ou des données distantes. [Documentation de GDAL](https://gdal.org/en/stable/drivers/raster/vrt.html).
 | **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY, listes de points XYZ dispersés, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
 
 ### Règles communes à tous les formats
