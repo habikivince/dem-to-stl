@@ -286,9 +286,9 @@ add**. The three levels below are what was actually tested.
 | LAS, LAZ | `.las` `.laz` | **supported, own pipeline** | Needs `laspy` (+`lazrs` for `.laz`). Ground class 2 by default; an unclassified cloud needs an explicit `--lidar-select`. See [Point clouds](#point-clouds-lasllaz). |
 | XYZ text, **regular grid** | `.xyz` | **supported** (GDAL "ASCII Gridded XYZ") | One `x y z` line per cell on a regular grid, rows in either order; a missing point or row is NoData (never zero; a real 0.000 m value stays a value). The file carries no CRS: `--source-crs` is required. A list of scattered points is **not** a grid and is refused ("Ungridded dataset", or "not recognized as a supported file format" when the file has a header line or extra columns); grid it first (e.g. `gdal_grid`), knowing that interpolation invents values between the points. |
 | Any other raster GDAL opens | | read through GDAL (not specifically tested) | Same rules for bands, CRS, units and NoData. |
+| **Not supported** | `.zip`/`.hgt.zip` archives, E57/PLY clouds, scattered XYZ point lists, curvilinear or irregular NetCDF grids, generic HDF5 | refused with a message | Unzip / convert first (`gdal_translate`, PDAL). |
 
 Only open VRT files from sources you trust. A VRT can direct GDAL to read other local files or remote data. [GDAL documentation](https://gdal.org/en/stable/drivers/raster/vrt.html).
-| **Not supported** | `.zip`/`.hgt.zip` archives, E57/PLY clouds, scattered XYZ point lists, curvilinear or irregular NetCDF grids, generic HDF5 | refused with a message | Unzip / convert first (`gdal_translate`, PDAL). |
 
 ### Rules shared by all formats
 
@@ -798,6 +798,11 @@ consistency, and the expected behavior of each option.
  
 ## Notable changes
  
+- **Protected outputs** (contributed by Lovasoa): an output (model, `--preview`, `--report`) that would
+  point at an input file or at the same target as another output is refused before any computation;
+  atomic writing now goes through a unique temporary folder (`output_files.py`), so an existing `.part`
+  file is no longer overwritten or deleted (`tests/test_phase1.py`). The README says to open only
+  trusted VRT files.
 - **`--fill-holes-only`** (opt-in, default unchanged): `gdal.FillNodata` extends the relief up to 50
   working pixels beyond the data (10 mm on the printed part at the default `--print-spacing-mm`),
   outside the file's footprint and around a large empty zone (a sea left as NoData). The log and the

@@ -290,9 +290,9 @@ ceux qui ont réellement été testés.
 | LAS, LAZ | `.las` `.laz` | **pris en charge, chaîne propre** | Requiert `laspy` (+`lazrs` pour les `.laz`). Classe sol 2 par défaut ; un nuage non classifié exige un `--lidar-select` explicite. Voir [Nuages de points](#nuages-de-points-lasllaz). |
 | XYZ texte, **grille régulière** | `.xyz` | **pris en charge** (GDAL « ASCII Gridded XYZ ») | Une ligne `x y z` par cellule d'une grille régulière, lignes dans l'un ou l'autre sens ; un point ou une ligne absent est du NoData (jamais zéro ; une altitude réelle de 0,000 m reste une valeur). Le fichier ne porte pas de CRS : `--source-crs` est obligatoire. Une liste de points dispersés n'est **pas** une grille et est refusée (« Ungridded dataset », ou « not recognized as a supported file format » si le fichier a une ligne d'en-tête ou des colonnes en plus) ; interpolez-la d'abord (par exemple avec `gdal_grid`), sachant que l'interpolation invente des valeurs entre les points. |
 | Tout autre raster ouvert par GDAL | | lu via GDAL (pas testé spécifiquement) | Mêmes règles de bandes, CRS, unités et NoData. |
+| **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY, listes de points XYZ dispersés, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
 
 Ouvre uniquement des fichiers VRT de confiance. Un VRT peut faire lire à GDAL d'autres fichiers locaux ou des données distantes. [Documentation de GDAL](https://gdal.org/en/stable/drivers/raster/vrt.html).
-| **Non pris en charge** | archives `.zip`/`.hgt.zip`, nuages E57/PLY, listes de points XYZ dispersés, grilles NetCDF curvilignes ou irrégulières, HDF5 générique | refusé avec un message | Décompresse / convertis d'abord (`gdal_translate`, PDAL). |
 
 ### Règles communes à tous les formats
 
@@ -822,6 +822,11 @@ cohérence des normales, et le comportement attendu de chaque option.
 
 ## Historique des changements notables
 
+- **Sorties protégées** (contribution de Lovasoa) : une sortie (modèle, `--preview`, `--report`) qui
+  désignerait un fichier d'entrée ou la même cible qu'une autre sortie est refusée avant tout calcul ;
+  l'écriture atomique passe par un dossier temporaire unique (`output_files.py`), si bien qu'un fichier
+  `.part` déjà présent n'est plus ni écrasé ni supprimé (`tests/test_phase1.py`). Le README précise
+  qu'on n'ouvre que des VRT de confiance.
 - **`--fill-holes-only`** (facultatif, défaut inchangé) : `gdal.FillNodata` prolonge le relief sur 50
   pixels de travail au-delà des données (10 mm sur la pièce imprimée avec le `--print-spacing-mm` par
   défaut), hors de l'emprise du fichier et autour d'une grande zone vide (une mer laissée sans donnée).
