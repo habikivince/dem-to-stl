@@ -286,6 +286,8 @@ add**. The three levels below are what was actually tested.
 | LAS, LAZ | `.las` `.laz` | **supported, own pipeline** | Needs `laspy` (+`lazrs` for `.laz`). Ground class 2 by default; an unclassified cloud needs an explicit `--lidar-select`. See [Point clouds](#point-clouds-lasllaz). |
 | XYZ text, **regular grid** | `.xyz` | **supported** (GDAL "ASCII Gridded XYZ") | One `x y z` line per cell on a regular grid, rows in either order; a missing point or row is NoData (never zero; a real 0.000 m value stays a value). The file carries no CRS: `--source-crs` is required. A list of scattered points is **not** a grid and is refused ("Ungridded dataset", or "not recognized as a supported file format" when the file has a header line or extra columns); grid it first (e.g. `gdal_grid`), knowing that interpolation invents values between the points. |
 | Any other raster GDAL opens | | read through GDAL (not specifically tested) | Same rules for bands, CRS, units and NoData. |
+
+Only open VRT files from sources you trust. A VRT can direct GDAL to read other local files or remote data. [GDAL documentation](https://gdal.org/en/stable/drivers/raster/vrt.html).
 | **Not supported** | `.zip`/`.hgt.zip` archives, E57/PLY clouds, scattered XYZ point lists, curvilinear or irregular NetCDF grids, generic HDF5 | refused with a message | Unzip / convert first (`gdal_translate`, PDAL). |
 
 ### Rules shared by all formats
